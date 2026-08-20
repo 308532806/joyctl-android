@@ -25,6 +25,7 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -83,6 +84,11 @@ class MainActivity : Activity() {
     private lateinit var packageInput: EditText
     private lateinit var regionSpinner: Spinner
 
+    private lateinit var pages: Array<View>
+    private val tabIcons = mutableListOf<TextView>()
+    private val tabLabels = mutableListOf<TextView>()
+    private var selectedTab = 0
+
     private val busyButtons = mutableListOf<Button>()
     private val rules = mutableListOf<RuleInfo>()
     private var activeRule: RuleInfo? = null
@@ -122,25 +128,76 @@ class MainActivity : Activity() {
         }
     }
 
+
     private fun buildUi() {
-        val scroll = ScrollView(this)
-        scroll.setBackgroundColor(Color.rgb(247, 248, 250))
-        scroll.clipToPadding = true
-        applySystemBarPadding(scroll)
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
-        root.setPadding(dp(16), dp(16), dp(16), dp(24))
-        scroll.addView(root, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        setContentView(scroll)
+        root.setBackgroundColor(Color.rgb(247, 248, 250))
+        applySystemBarPadding(root)
 
-        root.addView(title("JoyCtl 云控控制台", 24))
-        root.addView(text("云控策略 · 设备直连 · 官方协议", 13, 0xff526071.toInt()))
-        root.addView(text("看懂并修改小米 Joyose 的 MCC 云控策略：帧率限制、温度降帧表、CPU 基线、监控上报与预下载。", 12, 0xff526071.toInt()))
+        val header = LinearLayout(this)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
+        header.setPadding(dp(16), dp(10), dp(8), dp(8))
 
-        val status = panel(root, "📱 设备管理")
+        val titles = LinearLayout(this)
+        titles.orientation = LinearLayout.VERTICAL
+        titles.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        titles.addView(title("JoyCtl 云控控制台", 22))
+        titles.addView(text("云控策略 · 设备直连 · 官方协议", 12, 0xff526071.toInt()))
+        header.addView(titles)
+
+        val appHelp = collapsibleHint("看懂并修改小米 Joyose 的 MCC 云控策略：帧率限制、温度降帧表、CPU 基线、监控上报与预下载。")
+        header.addView(infoBadge(appHelp))
+        root.addView(header)
+        root.addView(appHelp, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).also {
+            it.setMargins(dp(16), 0, dp(16), dp(4))
+        })
+
+        val pageHost = FrameLayout(this)
+        pageHost.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+
+        val pageDevice = pageScroll()
+        val pageCloud = pageScroll()
+        val pageRules = pageScroll()
+        val pageLog = pageScroll()
+        pages = arrayOf(pageDevice, pageCloud, pageRules, pageLog)
+        pages.forEach { page ->
+            pageHost.addView(page, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+
+        buildDevicePage(pageContent(pageDevice))
+        buildCloudPage(pageContent(pageCloud))
+        buildRulesPage(pageContent(pageRules))
+        buildLogPage(pageContent(pageLog))
+
+        root.addView(pageHost)
+        root.addView(buildBottomNav())
+        setContentView(root)
+        selectTab(0)
+    }
+
+    private fun pageScroll(): ScrollView {
+        val scroll = ScrollView(this)
+        scroll.isFillViewport = true
+        scroll.clipToPadding = false
+        val content = LinearLayout(this)
+        content.orientation = LinearLayout.VERTICAL
+        content.setPadding(dp(16), dp(4), dp(16), dp(24))
+        scroll.addView(content, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        return scroll
+    }
+
+    private fun pageContent(scroll: ScrollView): LinearLayout = scroll.getChildAt(0) as LinearLayout
+
+    private fun buildDevicePage(root: LinearLayout) {
+        val status = panel(
+            root,
+            "设备管理",
+            "安卓端直接通过 su 读取本机 Joyose 数据库，不需要 PC 侧 adb。推送前会校验 SQLite 结构，推送后会回读设备端 DB 复核。\n\n冻结云控会设置 persist.sys.sc_allow_conn=0 并停止 Joyose，防止 MCC 云端规则覆盖本地修改。",
+        )
         statusText = text("正在检测 root 和设备信息...", 14, 0xff111827.toInt())
         status.addView(statusText)
-        status.addView(hint("安卓端直接通过 su 读取本机 Joyose 数据库，不需要 PC 侧 adb。推送前会校验 SQLite 结构，推送后会回读设备端 DB 复核。"))
         val deviceRow = row()
         deviceRow.addView(rowAction("🔄 刷新状态") { refreshStatus() })
         deviceRow.addView(rowAction("⬇️ 拉取设备配置") { pullDeviceDb() })
@@ -150,12 +207,24 @@ class MainActivity : Activity() {
         pushRow.addView(rowAction("⬆️ 推送配置到设备") { pushDeviceDb() })
         pushRow.addView(rowAction("🧊 冻结云控") { switchCloud(false) })
         status.addView(pushRow)
-
         status.addView(action("☀️ 恢复云控") { switchCloud(true) })
-        status.addView(hint("冻结云控会设置 persist.sys.sc_allow_conn=0 并停止 Joyose，防止 MCC 云端规则覆盖本地修改。"))
 
-        val cloud = panel(root, "☁️ 云端拉取（官方协议）")
-        cloud.addView(hint("复刻 Joyose MCC getData 协议，从 mcc.inf.miui.com 拉取指定机型的 booster_config/common_config。"))
+        val versionPanel = panel(
+            root,
+            "版本与覆盖检测",
+            "读取规则 JSON 的 version / header.version，并和设备端 teg_config.db 对照，判断本地修改是否被 MCC 云控覆盖。",
+        )
+        versionStatusText = text("载入或推送配置后，将显示 JSON version 与设备端覆盖状态。", 13, 0xff111827.toInt())
+        versionPanel.addView(versionStatusText)
+        versionPanel.addView(action("检查设备版本/覆盖状态") { checkDeviceConfigState() })
+    }
+
+    private fun buildCloudPage(root: LinearLayout) {
+        val cloud = panel(
+            root,
+            "云端拉取",
+            "复刻 Joyose MCC getData 协议，从 mcc.inf.miui.com 拉取指定机型的 booster_config / common_config。",
+        )
         regionSpinner = Spinner(this)
         regionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, arrayOf("CN", "INTL", "INDIA", "RUSSIA"))
         cloud.addView(label("服务器区域"))
@@ -174,20 +243,20 @@ class MainActivity : Activity() {
         cloud.addView(localVersionInput)
         cloud.addView(action("🚀 从云端拉取规则") { fetchCloudRules() })
 
-        val files = panel(root, "📂 本地文件")
+        val files = panel(
+            root,
+            "本地文件",
+            "可打开 teg_config.db；也可打开单条规则 JSON。若已载入 DB，JSON 会写入当前规则编辑器；否则会生成一个临时 DB。",
+        )
         val fileRow = row()
         fileRow.addView(rowAction("打开本地 DB/JSON 文件") { openImportPicker() })
         fileRow.addView(rowAction("导出当前 DB") { openExportPicker() })
         files.addView(fileRow)
         fileText = text("当前：未载入", 12, 0xff526071.toInt())
         files.addView(fileText)
-        files.addView(hint("可打开 teg_config.db；也可打开单条规则 JSON。若已载入 DB，JSON 会写入当前规则编辑器；否则会生成一个临时 DB。"))
+    }
 
-        val versionPanel = panel(root, "🧭 版本与覆盖检测")
-        versionStatusText = text("载入或推送配置后，将显示 JSON version 与设备端覆盖状态。", 13, 0xff111827.toInt())
-        versionPanel.addView(versionStatusText)
-        versionPanel.addView(action("检查设备版本/覆盖状态") { checkDeviceConfigState() })
-
+    private fun buildRulesPage(root: LinearLayout) {
         val rulesPanel = panel(root, "规则列表")
         ruleSpinner = Spinner(this)
         ruleSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -199,7 +268,11 @@ class MainActivity : Activity() {
         }
         rulesPanel.addView(ruleSpinner)
 
-        val editorPanel = panel(root, "规则编辑")
+        val editorPanel = panel(
+            root,
+            "规则编辑",
+            "编辑区支持纵向/横向滑动查看长 JSON。保存后仍需到「设备」页点击“推送配置到设备”才会写入 Joyose。",
+        )
         val editorActions = row()
         editorActions.addView(rowAction("📄 原始 JSON") { toast("安卓版当前使用原始 JSON 编辑") })
         editorActions.addView(rowAction("🔄 重载") { reloadCurrentRule() })
@@ -207,7 +280,6 @@ class MainActivity : Activity() {
         editorPanel.addView(action("💾 保存修改") { saveCurrentRuleFromUi(showToast = true) })
         dirtyText = text("未载入规则", 12, 0xff526071.toInt())
         editorPanel.addView(dirtyText)
-        editorPanel.addView(hint("编辑区支持纵向/横向滑动查看长 JSON。保存后仍需点击“推送配置到设备”才会写入 Joyose。"))
         editor = EditText(this)
         editor.typeface = Typeface.MONOSPACE
         editor.gravity = Gravity.TOP or Gravity.START
@@ -236,7 +308,11 @@ class MainActivity : Activity() {
         }
         editorPanel.addView(editor, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(360)))
 
-        val templates = panel(root, "⚡ 一键策略模板")
+        val templates = panel(
+            root,
+            "一键策略模板",
+            "模板只改当前载入的规则 JSON。指定游戏包名可只作用于该游戏；留空表示全部。改完后仍需保存并推送到设备。",
+        )
         packageInput = input("目标游戏包名；留空表示全部", "")
         templates.addView(label("选择目标游戏（包名）"))
         templates.addView(packageInput)
@@ -251,19 +327,82 @@ class MainActivity : Activity() {
         templates.addView(action("开启 QSync 显示同步（实验性）") { applyTemplate(TemplateId.ENABLE_QSYNC) })
         templates.addView(action("恢复原始配置") { applyTemplate(TemplateId.RESET) })
 
-        val stats = panel(root, "📊 规则统计")
+        val stats = panel(root, "规则统计")
         ruleStatsText = text("未载入规则", 13, 0xff111827.toInt())
         stats.addView(ruleStatsText)
 
-        val features = panel(root, "🧩 功能识别")
+        val features = panel(
+            root,
+            "功能识别",
+            "根据当前规则 JSON 识别帧率锁、温控、后台冻结、监控上报等功能，并对比载入时的基线改动。",
+        )
         featureSummaryText = text("载入配置后，将显示当前规则支持的功能和相对载入时的改动。", 13, 0xff111827.toInt())
         features.addView(featureSummaryText)
+    }
 
-        val logPanel = panel(root, "日志")
+    private fun buildLogPage(root: LinearLayout) {
+        val logPanel = panel(root, "日志", "操作过程会写到这里，便于核对拉取、推送和校验结果。")
         logText = text("", 12, 0xff111827.toInt())
         logText.typeface = Typeface.MONOSPACE
         logPanel.addView(logText)
     }
+
+    private fun buildBottomNav(): LinearLayout {
+        val wrap = LinearLayout(this)
+        wrap.orientation = LinearLayout.VERTICAL
+        wrap.setBackgroundColor(Color.WHITE)
+        val divider = View(this)
+        divider.setBackgroundColor(0xffe5e7eb.toInt())
+        wrap.addView(divider, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
+
+        val nav = LinearLayout(this)
+        nav.orientation = LinearLayout.HORIZONTAL
+        nav.setPadding(0, dp(6), 0, dp(8))
+        listOf(
+            Triple("📱", "设备", 0),
+            Triple("☁️", "云端", 1),
+            Triple("🧩", "规则", 2),
+            Triple("📋", "日志", 3),
+        ).forEach { (icon, label, index) ->
+            nav.addView(tabItem(icon, label, index))
+        }
+        wrap.addView(nav, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return wrap
+    }
+
+    private fun tabItem(icon: String, label: String, index: Int): LinearLayout {
+        val item = LinearLayout(this)
+        item.orientation = LinearLayout.VERTICAL
+        item.gravity = Gravity.CENTER
+        item.isClickable = true
+        item.isFocusable = true
+        item.setPadding(0, dp(4), 0, dp(2))
+        item.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+        val iconView = text(icon, 18, 0xff6b7280.toInt())
+        iconView.gravity = Gravity.CENTER
+        val labelView = text(label, 11, 0xff6b7280.toInt())
+        labelView.gravity = Gravity.CENTER
+        labelView.typeface = Typeface.DEFAULT_BOLD
+        item.addView(iconView)
+        item.addView(labelView)
+        tabIcons.add(iconView)
+        tabLabels.add(labelView)
+        item.setOnClickListener { selectTab(index) }
+        return item
+    }
+
+    private fun selectTab(index: Int) {
+        selectedTab = index
+        pages.forEachIndexed { i, page ->
+            page.visibility = if (i == index) View.VISIBLE else View.GONE
+        }
+        val active = 0xff1d4ed8.toInt()
+        val idle = 0xff6b7280.toInt()
+        tabIcons.forEachIndexed { i, view -> view.setTextColor(if (i == index) active else idle) }
+        tabLabels.forEachIndexed { i, view -> view.setTextColor(if (i == index) active else idle) }
+    }
+
 
     private fun refreshStatus() {
         runTask("刷新状态") {
@@ -662,6 +801,7 @@ class MainActivity : Activity() {
         )
     }
 
+
     private fun applySystemBarPadding(view: View) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             view.setOnApplyWindowInsetsListener { v, insets ->
@@ -731,16 +871,56 @@ class MainActivity : Activity() {
         ui.post { Toast.makeText(this, message, Toast.LENGTH_LONG).show() }
     }
 
-    private fun panel(root: LinearLayout, title: String): LinearLayout {
+    private fun panel(root: LinearLayout, title: String, help: String? = null): LinearLayout {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(14), dp(12), dp(14), dp(14))
-        box.background = rounded(0xffffffff.toInt(), 8, 0xffe2e8f0.toInt())
+        box.background = rounded(0xffffffff.toInt(), 12, 0xffe2e8f0.toInt())
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.setMargins(0, dp(14), 0, 0)
+        lp.setMargins(0, dp(10), 0, 0)
         root.addView(box, lp)
-        box.addView(title(title, 18))
+
+        val header = LinearLayout(this)
+        header.orientation = LinearLayout.HORIZONTAL
+        header.gravity = Gravity.CENTER_VERTICAL
+        val titleView = title(title, 17)
+        titleView.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        header.addView(titleView)
+        box.addView(header)
+
+        if (!help.isNullOrBlank()) {
+            val hintView = collapsibleHint(help)
+            header.addView(infoBadge(hintView))
+            box.addView(hintView)
+        }
         return box
+    }
+
+    private fun collapsibleHint(s: String): TextView = text(s, 12, 0xff6b7280.toInt()).also {
+        it.visibility = View.GONE
+        it.setPadding(dp(10), dp(8), dp(10), dp(8))
+        it.background = rounded(0xfff3f6fb.toInt(), 8, 0xffdbe4f0.toInt())
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(8), 0, 0)
+        it.layoutParams = lp
+    }
+
+    private fun infoBadge(target: View): TextView {
+        val badge = TextView(this)
+        badge.text = "ⓘ"
+        badge.setTextSize(15f)
+        badge.setTextColor(0xff64748b.toInt())
+        badge.gravity = Gravity.CENTER
+        badge.setPadding(dp(8), dp(4), dp(8), dp(4))
+        badge.isClickable = true
+        badge.isFocusable = true
+        badge.contentDescription = "显示说明"
+        badge.setOnClickListener {
+            val show = target.visibility != View.VISIBLE
+            target.visibility = if (show) View.VISIBLE else View.GONE
+            badge.setTextColor(if (show) 0xff1d4ed8.toInt() else 0xff64748b.toInt())
+        }
+        return badge
     }
 
     private fun row(): LinearLayout {
@@ -785,14 +965,6 @@ class MainActivity : Activity() {
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.setMargins(0, dp(10), 0, 0)
         it.layoutParams = lp
-    }
-
-    private fun hint(s: String): TextView = text(s, 12, 0xff6b7280.toInt()).also {
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.setMargins(0, dp(8), 0, 0)
-        it.layoutParams = lp
-        it.setPadding(dp(10), dp(8), dp(10), dp(8))
-        it.background = rounded(0xfff3f6fb.toInt(), 8, 0xffdbe4f0.toInt())
     }
 
     private fun title(s: String, sp: Int): TextView = text(s, sp, 0xff111827.toInt()).also {

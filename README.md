@@ -4,8 +4,10 @@ JoyCtl Android 是基于 [hexwander/joyctl](https://github.com/hexwander/joyctl)
 
 ## 功能
 
+- 底部导航切换：设备、云端、规则、日志
+- 说明文案收到各面板右上角 ⓘ，点击后展开
 - 本机 root 检测、设备代号、MIUI/HyperOS 版本和 `persist.sys.sc_allow_conn` 状态读取
-- 读取 `/data/data/com.xiaomi.joyose/databases/teg_config.db`
+- 读取 `com.xiaomi.joyose` 的 `teg_config.db`
 - 编辑 `rules.rule_content` 中的 JSON 策略并写回 SQLite
 - 推送修改后的数据库到 Joyose，并在覆盖前生成 `.joyctl.bak` 备份
 - 冻结/恢复 Joyose MCC 云控下发：`persist.sys.sc_allow_conn=0/1`
