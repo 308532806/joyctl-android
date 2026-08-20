@@ -19,6 +19,7 @@ import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -42,7 +43,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-private const val JOYOSE_DB = "/data/data/com.xiaomi.joyose/databases/teg_config.db"
+private const val JOYOSE_DB_DEFAULT = "/data/user_de/0/com.xiaomi.joyose/databases/teg_config.db"
 private const val REQ_IMPORT_DB = 100
 private const val REQ_EXPORT_DB = 101
 
@@ -85,6 +86,7 @@ class MainActivity : Activity() {
     private var loadingEditor = false
     private var dirty = false
     private var currentLabel = "未载入"
+    private var activeJoyoseDbPath = JOYOSE_DB_DEFAULT
 
     private val currentDbFile: File by lazy { File(filesDir, "teg_config_work.db") }
 
@@ -114,6 +116,8 @@ class MainActivity : Activity() {
     private fun buildUi() {
         val scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.rgb(247, 248, 250))
+        scroll.clipToPadding = false
+        applySystemBarPadding(scroll)
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(dp(16), dp(16), dp(16), dp(24))
@@ -238,15 +242,17 @@ class MainActivity : Activity() {
     private fun pullDeviceDb() {
         runTask("拉取设备配置") {
             if (!Shell.isRooted()) throw IOException("需要 root 权限")
+            val dbPath = resolveJoyoseDbPath(requireExistingFile = true)
+            activeJoyoseDbPath = dbPath
             val uid = android.os.Process.myUid()
             val dst = q(currentDbFile.absolutePath)
             Shell.root(
-                "cp ${q(JOYOSE_DB)} $dst && " +
+                "cat ${q(dbPath)} > $dst && " +
                     "(chown $uid:$uid $dst 2>/dev/null && chmod 600 $dst || chmod 666 $dst)"
             )
             backupCurrentDb("device-pull")
             loadDbFromFile("设备配置")
-            appendLog("已从 Joyose 拉取 ${currentDbFile.length()} bytes")
+            appendLog("已从 $dbPath 拉取 ${currentDbFile.length()} bytes")
         }
     }
 
@@ -255,16 +261,19 @@ class MainActivity : Activity() {
         runTask("推送配置") {
             if (!Shell.isRooted()) throw IOException("需要 root 权限")
             JoyoseDb.validate(currentDbFile)
+            val dbPath = resolveJoyoseDbPath(requireExistingFile = false)
+            activeJoyoseDbPath = dbPath
             val src = q(currentDbFile.absolutePath)
             Shell.root("am force-stop com.xiaomi.joyose")
-            Shell.root("cp ${q(JOYOSE_DB)} ${q("$JOYOSE_DB.joyctl.bak")} 2>/dev/null || true")
-            Shell.root("cat $src > ${q(JOYOSE_DB)} && chmod 660 ${q(JOYOSE_DB)}")
-            val remoteSize = Shell.root("wc -c < ${q(JOYOSE_DB)}").trim().toLongOrNull()
+            Shell.root("mkdir -p ${q(dbPath.substringBeforeLast('/'))}")
+            Shell.root("[ -f ${q(dbPath)} ] && cp ${q(dbPath)} ${q("$dbPath.joyctl.bak")} 2>/dev/null || true")
+            Shell.root("cat $src > ${q(dbPath)} && chmod 660 ${q(dbPath)} && (chown system:system ${q(dbPath)} 2>/dev/null || true)")
+            val remoteSize = Shell.root("wc -c < ${q(dbPath)}").trim().toLongOrNull()
             if (remoteSize != currentDbFile.length()) {
                 throw IOException("数据库大小校验失败：本地 ${currentDbFile.length()} / 设备 $remoteSize")
             }
             Shell.root("am force-stop com.xiaomi.joyose")
-            appendLog("已推送并校验 $remoteSize bytes；设备端备份：$JOYOSE_DB.joyctl.bak")
+            appendLog("已推送并校验 $remoteSize bytes；目标：$dbPath")
         }
     }
 
@@ -454,6 +463,70 @@ class MainActivity : Activity() {
             ?: return null
         val imei = imeiRaw.split(",", " ").firstOrNull { it.length >= 14 } ?: return null
         return DeviceIdentity(MccClient.md5Hex(imei), MccClient.sha256Hex(imei))
+    }
+
+    private fun resolveJoyoseDbPath(requireExistingFile: Boolean): String {
+        val mode = if (requireExistingFile) "read" else "write"
+        val script = """
+            candidates='
+            /data/user_de/0/com.xiaomi.joyose/databases/teg_config.db
+            /data/user/0/com.xiaomi.joyose/databases/teg_config.db
+            /data/data/com.xiaomi.joyose/databases/teg_config.db
+            /data_mirror/data_de/null/0/com.xiaomi.joyose/databases/teg_config.db
+            /data_mirror/data_ce/null/0/com.xiaomi.joyose/databases/teg_config.db
+            '
+            for p in ${'$'}candidates; do
+              [ -f "${'$'}p" ] && { echo "${'$'}p"; exit 0; }
+            done
+            if [ "$mode" = "write" ]; then
+              dirs='
+              /data/user_de/0/com.xiaomi.joyose/databases
+              /data/user/0/com.xiaomi.joyose/databases
+              /data/data/com.xiaomi.joyose/databases
+              /data_mirror/data_de/null/0/com.xiaomi.joyose/databases
+              /data_mirror/data_ce/null/0/com.xiaomi.joyose/databases
+              '
+              for d in ${'$'}dirs; do
+                [ -d "${'$'}d" ] && { echo "${'$'}d/teg_config.db"; exit 0; }
+              done
+              bases='
+              /data/user_de/0/com.xiaomi.joyose
+              /data/user/0/com.xiaomi.joyose
+              /data/data/com.xiaomi.joyose
+              /data_mirror/data_de/null/0/com.xiaomi.joyose
+              /data_mirror/data_ce/null/0/com.xiaomi.joyose
+              '
+              for b in ${'$'}bases; do
+                [ -d "${'$'}b" ] && { echo "${'$'}b/databases/teg_config.db"; exit 0; }
+              done
+            fi
+            echo ''
+            exit 2
+        """.trimIndent()
+        val result = Shell.run(script, root = true, timeoutSeconds = 10)
+        val path = result.stdout.trim().lineSequence().firstOrNull { it.startsWith("/") }.orEmpty()
+        if (path.isNotBlank()) return path
+        throw IOException(
+            "未找到 Joyose 数据库。已检查 /data/user_de、/data/user、/data/data 和 /data_mirror 下的 com.xiaomi.joyose/databases/teg_config.db。" +
+                "请先打开游戏工具箱或 Joyose 相关功能让系统生成云控配置；也可以先用云端拉取生成 DB 后再推送。"
+        )
+    }
+
+    private fun applySystemBarPadding(view: View) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            view.setOnApplyWindowInsetsListener { v, insets ->
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                v.setPadding(0, bars.top, 0, bars.bottom)
+                insets
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            view.setOnApplyWindowInsetsListener { v, insets ->
+                v.setPadding(0, insets.systemWindowInsetTop, 0, insets.systemWindowInsetBottom)
+                insets
+            }
+        }
+        view.post { view.requestApplyInsets() }
     }
 
     private fun readFastProp(key: String): String {
@@ -692,10 +765,12 @@ object JoyoseDb {
     }
 
     fun buildFromCloudRules(file: File, rules: List<CloudRule>) {
-        if (file.exists() && !file.delete()) throw IOException("无法替换当前 DB")
+        SQLiteDatabase.deleteDatabase(file)
         val db = SQLiteDatabase.openOrCreateDatabase(file, null)
         try {
-            db.execSQL("CREATE TABLE android_metadata (locale TEXT)")
+            db.execSQL("DROP TABLE IF EXISTS rules")
+            db.execSQL("CREATE TABLE IF NOT EXISTS android_metadata (locale TEXT)")
+            db.delete("android_metadata", null, null)
             db.execSQL("INSERT INTO android_metadata (locale) VALUES ('zh_CN')")
             db.execSQL("CREATE TABLE rules (_id INTEGER PRIMARY KEY AUTOINCREMENT,rule_id INTEGER,rule_version INTEGER,rule_module TEXT,rule_content TEXT)")
             db.beginTransaction()
