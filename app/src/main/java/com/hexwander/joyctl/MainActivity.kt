@@ -70,6 +70,7 @@ class MainActivity : Activity() {
     private lateinit var dirtyText: TextView
     private lateinit var logText: TextView
     private lateinit var fileText: TextView
+    private lateinit var ruleStatsText: TextView
     private lateinit var ruleSpinner: Spinner
     private lateinit var editor: EditText
     private lateinit var deviceInput: EditText
@@ -124,35 +125,25 @@ class MainActivity : Activity() {
         scroll.addView(root, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         setContentView(scroll)
 
-        root.addView(title("JoyCtl Android", 24))
-        root.addView(text("小米 Joyose 云控配置控制台。本机通过 root 权限读写 teg_config.db。", 13, 0xff526071.toInt()))
+        root.addView(title("JoyCtl 云控控制台", 24))
+        root.addView(text("云控策略 · 设备直连 · 官方协议", 13, 0xff526071.toInt()))
 
-        val status = panel(root, "设备")
+        val status = panel(root, "📱 设备管理")
         statusText = text("正在检测 root 和设备信息...", 14, 0xff111827.toInt())
         status.addView(statusText)
         val deviceRow = row()
-        deviceRow.addView(rowAction("刷新状态") { refreshStatus() })
-        deviceRow.addView(rowAction("拉取设备配置") { pullDeviceDb() })
+        deviceRow.addView(rowAction("🔄 刷新状态") { refreshStatus() })
+        deviceRow.addView(rowAction("⬇️ 拉取设备配置") { pullDeviceDb() })
         status.addView(deviceRow)
 
         val pushRow = row()
-        pushRow.addView(rowAction("保存当前规则") { saveCurrentRuleFromUi(showToast = true) })
-        pushRow.addView(rowAction("推送到 Joyose") { pushDeviceDb() })
+        pushRow.addView(rowAction("⬆️ 推送配置到设备") { pushDeviceDb() })
+        pushRow.addView(rowAction("🧊 冻结云控") { switchCloud(false) })
         status.addView(pushRow)
 
-        val cloudSwitchRow = row()
-        cloudSwitchRow.addView(rowAction("冻结云控") { switchCloud(false) })
-        cloudSwitchRow.addView(rowAction("恢复云控") { switchCloud(true) })
-        status.addView(cloudSwitchRow)
+        status.addView(action("☀️ 恢复云控") { switchCloud(true) })
 
-        val fileRow = row()
-        fileRow.addView(rowAction("导入 DB") { openImportPicker() })
-        fileRow.addView(rowAction("导出 DB") { openExportPicker() })
-        status.addView(fileRow)
-        fileText = text("当前：未载入", 12, 0xff526071.toInt())
-        status.addView(fileText)
-
-        val cloud = panel(root, "云端 MCC 拉取")
+        val cloud = panel(root, "☁️ 云端拉取（官方协议）")
         regionSpinner = Spinner(this)
         regionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, arrayOf("CN", "INTL", "INDIA", "RUSSIA"))
         cloud.addView(label("服务器区域"))
@@ -161,17 +152,25 @@ class MainActivity : Activity() {
         miuiInput = input("MIUI/HyperOS 版本，例如 V816", readFastProp("ro.miui.ui.version.name").ifBlank { "V816" })
         appVersionInput = input("Joyose appVersion", "477")
         localVersionInput = input("本地版本号，0 表示全量", "0")
-        cloud.addView(label("设备代号"))
+        cloud.addView(label("设备身份代号 (device)"))
         cloud.addView(deviceInput)
-        cloud.addView(label("系统版本"))
+        cloud.addView(label("MIUI 版本"))
         cloud.addView(miuiInput)
         cloud.addView(label("Joyose appVersion"))
         cloud.addView(appVersionInput)
-        cloud.addView(label("本地 version"))
+        cloud.addView(label("本地版本号 (version)"))
         cloud.addView(localVersionInput)
-        cloud.addView(action("拉取云端规则并生成 DB") { fetchCloudRules() })
+        cloud.addView(action("🚀 从云端拉取规则") { fetchCloudRules() })
 
-        val editorPanel = panel(root, "规则编辑")
+        val files = panel(root, "📂 本地文件")
+        val fileRow = row()
+        fileRow.addView(rowAction("打开本地 DB 文件") { openImportPicker() })
+        fileRow.addView(rowAction("导出当前 DB") { openExportPicker() })
+        files.addView(fileRow)
+        fileText = text("当前：未载入", 12, 0xff526071.toInt())
+        files.addView(fileText)
+
+        val rulesPanel = panel(root, "规则列表")
         ruleSpinner = Spinner(this)
         ruleSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -180,7 +179,14 @@ class MainActivity : Activity() {
 
             override fun onNothingSelected(parent: AdapterView<*>?) = Unit
         }
-        editorPanel.addView(ruleSpinner)
+        rulesPanel.addView(ruleSpinner)
+
+        val editorPanel = panel(root, "规则编辑")
+        val editorActions = row()
+        editorActions.addView(rowAction("📄 原始 JSON") { toast("安卓版当前使用原始 JSON 编辑") })
+        editorActions.addView(rowAction("🔄 重载") { reloadCurrentRule() })
+        editorPanel.addView(editorActions)
+        editorPanel.addView(action("💾 保存修改") { saveCurrentRuleFromUi(showToast = true) })
         dirtyText = text("未载入规则", 12, 0xff526071.toInt())
         editorPanel.addView(dirtyText)
         editor = EditText(this)
@@ -201,20 +207,24 @@ class MainActivity : Activity() {
         })
         editorPanel.addView(editor, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(360)))
 
-        val templates = panel(root, "策略模板")
+        val templates = panel(root, "⚡ 一键策略模板")
         packageInput = input("目标游戏包名；留空表示全部", "")
-        templates.addView(label("模板目标包名"))
+        templates.addView(label("选择目标游戏（包名）"))
         templates.addView(packageInput)
-        templates.addView(action("解除 Novatek 帧率锁") { applyTemplate(TemplateId.UNLOCK_FPS) })
-        templates.addView(action("放宽所有游戏 PID 温控") { applyTemplate(TemplateId.RELAX_PID) })
-        templates.addView(action("提升 migt 大核基线") { applyTemplate(TemplateId.RAISE_MIGT) })
-        templates.addView(action("清除全局温度降帧表") { applyTemplate(TemplateId.CLEAR_THERMAL) })
+        templates.addView(action("解锁指定游戏的帧率锁") { applyTemplate(TemplateId.UNLOCK_FPS) })
+        templates.addView(action("放宽所有游戏的温控") { applyTemplate(TemplateId.RELAX_PID) })
+        templates.addView(action("提升指定游戏 CPU 大核基线") { applyTemplate(TemplateId.RAISE_MIGT) })
+        templates.addView(action("移除全局温度降帧表") { applyTemplate(TemplateId.CLEAR_THERMAL) })
         templates.addView(action("关闭后台冻结") { applyTemplate(TemplateId.DISABLE_BACKGROUND_FREEZE) })
         templates.addView(action("关闭监控与质量上报") { applyTemplate(TemplateId.DISABLE_TELEMETRY) })
         templates.addView(action("关闭资源预下载") { applyTemplate(TemplateId.DISABLE_PREDOWNLOAD) })
-        templates.addView(action("禁用 L3 卡顿日志") { applyTemplate(TemplateId.DISABLE_L3_LOG) })
-        templates.addView(action("开启 QSync 显示同步") { applyTemplate(TemplateId.ENABLE_QSYNC) })
+        templates.addView(action("禁用 L3 卡顿日志采集") { applyTemplate(TemplateId.DISABLE_L3_LOG) })
+        templates.addView(action("开启 QSync 显示同步（实验性）") { applyTemplate(TemplateId.ENABLE_QSYNC) })
         templates.addView(action("恢复原始配置") { applyTemplate(TemplateId.RESET) })
+
+        val stats = panel(root, "📊 规则统计")
+        ruleStatsText = text("未载入规则", 13, 0xff111827.toInt())
+        stats.addView(ruleStatsText)
 
         val logPanel = panel(root, "日志")
         logText = text("", 12, 0xff111827.toInt())
@@ -374,6 +384,7 @@ class MainActivity : Activity() {
                 editor.setText("")
                 loadingEditor = false
                 dirtyText.text = "未找到规则"
+                updateRuleStats(null)
             }
         }
     }
@@ -396,6 +407,7 @@ class MainActivity : Activity() {
         loadingEditor = false
         dirty = false
         updateDirtyText()
+        updateRuleStats(content)
     }
 
     private fun saveCurrentRuleFromUi(showToast: Boolean): Boolean {
@@ -416,6 +428,7 @@ class MainActivity : Activity() {
             loadingEditor = false
             dirty = false
             updateDirtyText()
+            updateRuleStats(normalized)
             if (showToast) toast("已保存到当前 DB")
             true
         } catch (e: Exception) {
@@ -438,10 +451,47 @@ class MainActivity : Activity() {
             loadingEditor = false
             dirty = true
             updateDirtyText()
+            updateRuleStats(result.json)
             toast(result.message)
         } catch (e: Exception) {
             toast("模板失败：${e.message}")
         }
+    }
+
+    private fun reloadCurrentRule() {
+        val rule = activeRule ?: run {
+            toast("请先载入规则")
+            return
+        }
+        try {
+            val content = JoyoseDb.readRuleContent(currentDbFile, rule.ruleId)
+            showRule(content)
+            toast("已重载当前规则")
+        } catch (e: Exception) {
+            toast("重载失败：${e.message}")
+        }
+    }
+
+    private fun updateRuleStats(content: String?) {
+        if (!::ruleStatsText.isInitialized) return
+        val rule = activeRule
+        if (rule == null || content.isNullOrBlank()) {
+            ruleStatsText.text = "未载入规则"
+            return
+        }
+        val stats = runCatching {
+            val root = JSONObject(normalizeJson(content))
+            val booster = root.optJSONObject("params")?.optJSONObject("game_booster")
+                ?: root.optJSONObject("game_booster")
+            "顶层字段：${root.length()}\n" +
+                "game_booster 子项：${booster?.length() ?: 0}\n" +
+                "原始大小：${(rule.contentLength / 1024.0).format1()} KB\n" +
+                "规则模块：${rule.module}\n" +
+                "rule_id：${rule.ruleId} · v${rule.version}"
+        }.getOrElse {
+            "当前规则不是可统计的 JSON\n规则模块：${rule.module}\nrule_id：${rule.ruleId} · v${rule.version}"
+        }
+        ruleStatsText.text = stats
     }
 
     private fun backupCurrentDb(source: String) {
