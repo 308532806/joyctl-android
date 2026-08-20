@@ -552,7 +552,7 @@ class MainActivity : Activity() {
         val e = EditText(this)
         e.hint = hint
         e.setText(initial)
-        e.singleLine = true
+        e.setSingleLine(true)
         e.setTextSize(14f)
         e.setPadding(dp(10), 0, dp(10), 0)
         return e
