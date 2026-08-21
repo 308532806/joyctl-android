@@ -2,11 +2,13 @@ package com.hexwander.joyctl
 
 import android.app.Activity
 import android.content.ContentValues
+import android.content.res.ColorStateList
 import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -23,7 +25,6 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -91,7 +92,10 @@ class MainActivity : Activity() {
     private val tabLabels = mutableListOf<TextView>()
     private var selectedTab = 0
 
-    private val busyButtons = mutableListOf<Button>()
+    private val busyButtons = mutableListOf<TextView>()
+    private val propCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    @Volatile private var taskBusy = false
+    private var joyoseCache: Pair<String, String>? = null
     private val rules = mutableListOf<RuleInfo>()
     private var activeRule: RuleInfo? = null
     private var originalRuleJson = ""
@@ -183,10 +187,13 @@ class MainActivity : Activity() {
     private fun pageScroll(): ScrollView {
         val scroll = ScrollView(this)
         scroll.isFillViewport = true
+        scroll.clipChildren = false
         scroll.clipToPadding = false
         val content = LinearLayout(this)
         content.orientation = LinearLayout.VERTICAL
-        content.setPadding(dp(16), dp(4), dp(16), dp(24))
+        content.clipChildren = false
+        content.clipToPadding = false
+        content.setPadding(dp(16), dp(4), dp(16), dp(36))
         scroll.addView(content, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         return scroll
     }
@@ -487,32 +494,33 @@ class MainActivity : Activity() {
 
 
     private fun refreshStatus() {
-        runTask("刷新状态") {
-            val rooted = Shell.isRooted()
-            val device = readFastProp("ro.product.device").ifBlank { Build.DEVICE ?: "-" }
-            val model = readFastProp("ro.product.marketname").ifBlank { Build.MODEL ?: "-" }
-            val miui = readFastProp("ro.miui.ui.version.name").ifBlank { "-" }
-            val android = readFastProp("ro.build.version.release").ifBlank { Build.VERSION.RELEASE ?: "-" }
-            val scRaw = readFastProp("persist.sys.sc_allow_conn").ifBlank { "unknown" }
-            val scAllowed = scRaw == "1" || scRaw.equals("true", ignoreCase = true)
-            val joyose = detectInstalledJoyose()
-            ui.post {
-                renderDeviceStats(model, device, "$miui / Android $android", rooted, scAllowed, scRaw, joyose)
-                if (deviceInput.text.isBlank()) deviceInput.setText(device)
-                if (miuiInput.text.isBlank() || miuiInput.text.toString() == "V816") miuiInput.setText(miui.ifBlank { "V816" })
-                if (joyose != null && (appVersionInput.text.isBlank() || appVersionInput.text.toString() == "477")) {
-                    appVersionInput.setText(joyose.first)
-                }
-                if (::joyoseHintText.isInitialized) {
-                    joyoseHintText.text = joyose?.let {
-                        "已检测到本机 Joyose ${it.second}（appVersion=${it.first}），拉取时优先使用。"
-                    } ?: "未检测到本机 Joyose 版本，将按机型探测可用的云端配置。"
-                }
-            }
-            appendLog("Root=${if (rooted) "yes" else "no"}, sc_allow_conn=$scRaw, joyose=${joyose?.second ?: "n/a"}")
-        }
+        runTask("刷新状态") { refreshStatusNow() }
     }
 
+    private fun refreshStatusNow() {
+        val rooted = Shell.isRooted()
+        val device = readFastProp("ro.product.device").ifBlank { Build.DEVICE ?: "-" }
+        val model = readFastProp("ro.product.marketname").ifBlank { Build.MODEL ?: "-" }
+        val miui = readFastProp("ro.miui.ui.version.name").ifBlank { "-" }
+        val android = readFastProp("ro.build.version.release").ifBlank { Build.VERSION.RELEASE ?: "-" }
+        val scRaw = readFastProp("persist.sys.sc_allow_conn").ifBlank { "unknown" }
+        val scAllowed = scRaw == "1" || scRaw.equals("true", ignoreCase = true)
+        val joyose = detectInstalledJoyose()
+        ui.post {
+            renderDeviceStats(model, device, "$miui / Android $android", rooted, scAllowed, scRaw, joyose)
+            if (deviceInput.text.isBlank()) deviceInput.setText(device)
+            if (miuiInput.text.isBlank() || miuiInput.text.toString() == "V816") miuiInput.setText(miui.ifBlank { "V816" })
+            if (joyose != null && (appVersionInput.text.isBlank() || appVersionInput.text.toString() == "477")) {
+                appVersionInput.setText(joyose.first)
+            }
+            if (::joyoseHintText.isInitialized) {
+                joyoseHintText.text = joyose?.let {
+                    "已检测到本机 Joyose ${it.second}（appVersion=${it.first}），拉取时优先使用。"
+                } ?: "未检测到本机 Joyose 版本，将按机型探测可用的云端配置。"
+            }
+        }
+        appendLog("Root=${if (rooted) "yes" else "no"}, sc_allow_conn=$scRaw, joyose=${joyose?.second ?: "n/a"}")
+    }
     private fun renderDeviceStats(
         model: String,
         device: String,
@@ -606,6 +614,7 @@ class MainActivity : Activity() {
             if (!Shell.isRooted()) throw IOException("需要 root 权限")
             val value = if (enabled) "1" else "0"
             Shell.root("setprop persist.sys.sc_allow_conn $value && am force-stop com.xiaomi.joyose")
+            propCache.remove("persist.sys.sc_allow_conn")
             val verified = readFastProp("persist.sys.sc_allow_conn")
             appendLog("persist.sys.sc_allow_conn=$verified")
             refreshStatus()
@@ -618,8 +627,8 @@ class MainActivity : Activity() {
         val miuiVersion = miuiInput.text.toString().trim().ifBlank { "V816" }
         val typedAppVersion = appVersionInput.text.toString().trim()
         val localVersion = localVersionInput.text.toString().trim().ifBlank { "0" }
-        val identity = readDeviceIdentityOrNull()
         runTask("云端拉取") {
+            val identity = readDeviceIdentityOrNull()
             val installed = detectInstalledJoyose()
             val preferred = typedAppVersion.ifBlank { installed?.first.orEmpty() }
             val attempts = linkedSetOf<String>()
@@ -698,16 +707,23 @@ class MainActivity : Activity() {
     }
 
     private fun detectInstalledJoyose(): Pair<String, String>? {
-        val dump = listOf(false, true).asSequence().mapNotNull { asRoot ->
-            runCatching { Shell.run("dumpsys package com.xiaomi.joyose", root = asRoot, timeoutSeconds = 8).stdout }.getOrNull()
-                ?.takeIf { it.contains("versionCode=") || it.contains("versionName=") }
-        }.firstOrNull().orEmpty()
-        val code = Regex("versionCode=(\\d+)").find(dump)?.groupValues?.getOrNull(1)
-        val name = Regex("versionName=([^\\s]+)").find(dump)?.groupValues?.getOrNull(1)
-        if (code.isNullOrBlank() && name.isNullOrBlank()) return null
-        val appVersion = code ?: name!!.filter { it.isDigit() }.takeLast(3).ifBlank { name.filter { it.isDigit() } }
-        if (appVersion.isBlank()) return null
-        return appVersion to (name ?: appVersion)
+        joyoseCache?.let { return it }
+        val fromPm = runCatching {
+            val info = packageManager.getPackageInfo("com.xiaomi.joyose", 0)
+            val code = if (Build.VERSION.SDK_INT >= 28) {
+                info.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toString()
+            }
+            val name = info.versionName?.trim().orEmpty().ifBlank { code }
+            code to name
+        }.getOrNull()
+        if (fromPm != null) {
+            joyoseCache = fromPm
+            return fromPm
+        }
+        return null
     }
     private fun versionNameFor(appVersion: String): String {
         val digits = appVersion.filter { it.isDigit() }
@@ -1052,32 +1068,45 @@ class MainActivity : Activity() {
     }
 
     private fun readFastProp(key: String): String {
-        return runCatching { Shell.run("getprop $key", root = false, timeoutSeconds = 4).stdout.trim() }
+        propCache[key]?.let { return it }
+        val value = runCatching { Shell.run("getprop $key", root = false, timeoutSeconds = 2).stdout.trim() }
             .getOrDefault("")
+        if (value.isNotBlank() && !key.startsWith("persist.")) propCache[key] = value
+        return value
     }
 
     private fun runTask(name: String, block: () -> Unit) {
-        setBusy(true)
-        worker.execute {
-            try {
-                appendLog("$name...")
-                block()
-                appendLog("$name 完成")
-            } catch (t: Throwable) {
-                appendLog("$name 失败：${t.message ?: t.javaClass.simpleName}")
-                toast("$name 失败：${t.message ?: t.javaClass.simpleName}")
-            } finally {
-                setBusy(false)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            if (taskBusy) {
+                toast("正在执行其他任务，请稍候")
+                return
             }
+            setBusy(true)
+            worker.execute { runTaskBody(name, block, releaseBusy = true) }
+        } else {
+            runTaskBody(name, block, releaseBusy = false)
+        }
+    }
+
+    private fun runTaskBody(name: String, block: () -> Unit, releaseBusy: Boolean) {
+        try {
+            appendLog("$name...")
+            block()
+            appendLog("$name 完成")
+        } catch (t: Throwable) {
+            appendLog("$name 失败：${t.message ?: t.javaClass.simpleName}")
+            toast("$name 失败：${t.message ?: t.javaClass.simpleName}")
+        } finally {
+            if (releaseBusy) setBusy(false)
         }
     }
 
     private fun setBusy(busy: Boolean) {
+        taskBusy = busy
         ui.post {
-            busyButtons.forEach { it.isEnabled = !busy }
+            busyButtons.forEach { it.alpha = if (busy) 0.72f else 1f }
         }
     }
-
     private fun markDirty() {
         dirty = true
         updateDirtyText()
@@ -1106,7 +1135,9 @@ class MainActivity : Activity() {
     private fun panel(root: LinearLayout, title: String, help: String? = null): LinearLayout {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
-        box.setPadding(dp(14), dp(12), dp(14), dp(14))
+        box.clipChildren = false
+        box.clipToPadding = false
+        box.setPadding(dp(14), dp(12), dp(14), dp(18))
         box.background = rounded(0xffffffff.toInt(), 12, 0xffe2e8f0.toInt())
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.setMargins(0, dp(10), 0, 0)
@@ -1158,6 +1189,8 @@ class MainActivity : Activity() {
     private fun row(): LinearLayout {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.HORIZONTAL
+        box.clipChildren = false
+        box.clipToPadding = false
         box.gravity = Gravity.CENTER_VERTICAL
         return box
     }
@@ -1165,7 +1198,9 @@ class MainActivity : Activity() {
     private fun templateCard(name: String, desc: String, button: String, onClick: () -> Unit): LinearLayout {
         val card = LinearLayout(this)
         card.orientation = LinearLayout.VERTICAL
-        card.setPadding(dp(12), dp(10), dp(12), dp(12))
+        card.clipChildren = false
+        card.clipToPadding = false
+        card.setPadding(dp(12), dp(10), dp(12), dp(16))
         card.background = rounded(0xfff8fbff.toInt(), 12, 0xffdbe7f5.toInt())
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.setMargins(0, dp(8), 0, 0)
@@ -1181,11 +1216,13 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun action(label: String, kind: String = "default", onClick: () -> Unit): Button {
-        val b = Button(this)
+    private fun action(label: String, kind: String = "default", onClick: () -> Unit): TextView {
+        val b = TextView(this)
         b.text = label
-        b.isAllCaps = false
+        b.gravity = Gravity.CENTER
         b.setTextSize(13f)
+        b.isClickable = true
+        b.isFocusable = true
         styleButton(b, kind)
         b.setOnClickListener { onClick() }
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1195,24 +1232,31 @@ class MainActivity : Activity() {
         return b
     }
 
-    private fun rowAction(label: String, kind: String = "default", onClick: () -> Unit): Button {
+    private fun rowAction(label: String, kind: String = "default", onClick: () -> Unit): TextView {
         return action(label, kind, onClick).also {
             val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            lp.setMargins(0, dp(8), dp(8), 0)
+            lp.setMargins(0, dp(8), dp(6), 0)
             it.layoutParams = lp
         }
     }
 
-    private fun styleButton(b: Button, kind: String) {
+    private fun styleButton(b: TextView, kind: String) {
         val (bg, fg, stroke) = when (kind) {
             "primary" -> Triple(0xff4f8cff.toInt(), Color.WHITE, 0xff4f8cff.toInt())
             "success" -> Triple(0xffe8f8ef.toInt(), 0xff1fa365.toInt(), 0xffb7ebc6.toInt())
             else -> Triple(0xffeef5ff.toInt(), 0xff1d4ed8.toInt(), 0xffcfe3ff.toInt())
         }
-        b.background = rounded(bg, 10, stroke)
+        val content = rounded(bg, 10, stroke)
+        val mask = GradientDrawable().also {
+            it.setColor(Color.WHITE)
+            it.cornerRadius = dp(10).toFloat()
+        }
+        b.background = RippleDrawable(ColorStateList.valueOf(0x33000000), content, mask)
         b.setTextColor(fg)
         b.typeface = Typeface.DEFAULT_BOLD
-        b.minHeight = dp(42)
+        b.includeFontPadding = false
+        b.minHeight = dp(48)
+        b.setPadding(dp(10), dp(12), dp(10), dp(12))
     }
     private fun input(hint: String, initial: String): EditText {
         val e = EditText(this)
@@ -1259,8 +1303,12 @@ class MainActivity : Activity() {
 object Shell {
     data class Result(val code: Int, val stdout: String, val stderr: String)
 
+
     fun isRooted(): Boolean {
-        return runCatching { root("id", timeoutSeconds = 8).contains("uid=0") }.getOrDefault(false)
+        rootedCache?.let { return it }
+        val ok = runCatching { root("id", timeoutSeconds = 3).contains("uid=0") }.getOrDefault(false)
+        rootedCache = ok
+        return ok
     }
 
     fun root(command: String, timeoutSeconds: Long = 20): String {
@@ -1274,18 +1322,22 @@ object Shell {
 
     fun run(command: String, root: Boolean, timeoutSeconds: Long = 20): Result {
         val pb = if (root) ProcessBuilder("su", "-c", command) else ProcessBuilder("sh", "-c", command)
+        pb.redirectErrorStream(false)
         val p = pb.start()
+        val out = StringBuilder()
+        val err = StringBuilder()
+        val tOut = Thread { runCatching { out.append(p.inputStream.bufferedReader().readText()) } }
+        val tErr = Thread { runCatching { err.append(p.errorStream.bufferedReader().readText()) } }
+        tOut.start()
+        tErr.start()
         val done = p.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!done) {
-            p.destroyForcibly()
-            throw IOException("命令超时：$command")
-        }
-        val out = p.inputStream.bufferedReader().readText()
-        val err = p.errorStream.bufferedReader().readText()
-        return Result(p.exitValue(), out, err)
+        if (!done) p.destroyForcibly()
+        tOut.join(1500)
+        tErr.join(1500)
+        if (!done) throw IOException("命令超时：$command")
+        return Result(p.exitValue(), out.toString(), err.toString())
     }
 }
-
 object JoyoseDb {
     private const val MAX_DB_SIZE = 20 * 1024 * 1024L
 
