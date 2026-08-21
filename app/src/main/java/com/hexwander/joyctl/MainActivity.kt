@@ -69,6 +69,8 @@ class MainActivity : Activity() {
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     private lateinit var statusText: TextView
+    private lateinit var deviceStatsBox: LinearLayout
+    private lateinit var joyoseHintText: TextView
     private lateinit var dirtyText: TextView
     private lateinit var logText: TextView
     private lateinit var fileText: TextView
@@ -98,6 +100,7 @@ class MainActivity : Activity() {
     private var dirty = false
     private var currentLabel = "未载入"
     private var activeJoyoseDbPath = JOYOSE_DB_DEFAULT
+    private var pendingTemplate: TemplateId? = null
 
     private val currentDbFile: File by lazy { File(filesDir, "teg_config_work.db") }
 
@@ -196,18 +199,23 @@ class MainActivity : Activity() {
             "设备管理",
             "安卓端直接通过 su 读取本机 Joyose 数据库，不需要 PC 侧 adb。推送前会校验 SQLite 结构，推送后会回读设备端 DB 复核。\n\n冻结云控会设置 persist.sys.sc_allow_conn=0 并停止 Joyose，防止 MCC 云端规则覆盖本地修改。",
         )
+        deviceStatsBox = LinearLayout(this).also {
+            it.orientation = LinearLayout.VERTICAL
+        }
+        status.addView(deviceStatsBox)
         statusText = text("正在检测 root 和设备信息...", 14, 0xff111827.toInt())
-        status.addView(statusText)
-        val deviceRow = row()
-        deviceRow.addView(rowAction("🔄 刷新状态") { refreshStatus() })
-        deviceRow.addView(rowAction("⬇️ 拉取设备配置") { pullDeviceDb() })
-        status.addView(deviceRow)
+        deviceStatsBox.addView(statusText)
 
-        val pushRow = row()
-        pushRow.addView(rowAction("⬆️ 推送配置到设备") { pushDeviceDb() })
-        pushRow.addView(rowAction("🧊 冻结云控") { switchCloud(false) })
-        status.addView(pushRow)
-        status.addView(action("☀️ 恢复云控") { switchCloud(true) })
+        val pullPush = row()
+        pullPush.addView(rowAction("⬇️ 拉取设备配置", kind = "primary") { pullDeviceDb() })
+        pullPush.addView(rowAction("⬆️ 推送配置到设备", kind = "success") { pushDeviceDb() })
+        status.addView(pullPush)
+
+        val cloudRow = row()
+        cloudRow.addView(rowAction("🧊 冻结云控") { switchCloud(false) })
+        cloudRow.addView(rowAction("☀️ 恢复云控") { switchCloud(true) })
+        status.addView(cloudRow)
+        status.addView(action("🔄 刷新状态") { refreshStatus() })
 
         val versionPanel = panel(
             root,
@@ -218,30 +226,39 @@ class MainActivity : Activity() {
         versionPanel.addView(versionStatusText)
         versionPanel.addView(action("检查设备版本/覆盖状态") { checkDeviceConfigState() })
     }
-
     private fun buildCloudPage(root: LinearLayout) {
         val cloud = panel(
             root,
             "云端拉取",
-            "复刻 Joyose MCC getData 协议，从 mcc.inf.miui.com 拉取指定机型的 booster_config / common_config。",
+            "复刻 Joyose MCC getData 协议。会先用本机 Joyose 版本号拉取；若没有可应用规则，再按当前机型探测能搜到的最新云端配置。",
         )
         regionSpinner = Spinner(this)
         regionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, arrayOf("CN", "INTL", "INDIA", "RUSSIA"))
         cloud.addView(label("服务器区域"))
         cloud.addView(regionSpinner)
+        val installed: Pair<String, String>? = null
         deviceInput = input("设备代号，例如 myron / pudding", Build.DEVICE ?: "myron")
         miuiInput = input("MIUI/HyperOS 版本，例如 V816", readFastProp("ro.miui.ui.version.name").ifBlank { "V816" })
-        appVersionInput = input("Joyose appVersion", "477")
+        appVersionInput = input("Joyose appVersion", installed?.first ?: "477")
         localVersionInput = input("本地版本号，0 表示全量", "0")
         cloud.addView(label("设备身份代号 (device)"))
         cloud.addView(deviceInput)
         cloud.addView(label("MIUI 版本"))
         cloud.addView(miuiInput)
-        cloud.addView(label("Joyose appVersion"))
+        cloud.addView(label("Joyose appVersion（默认本机版本）"))
         cloud.addView(appVersionInput)
         cloud.addView(label("本地版本号 (version)"))
         cloud.addView(localVersionInput)
-        cloud.addView(action("🚀 从云端拉取规则") { fetchCloudRules() })
+        joyoseHintText = text(
+            installed?.let { "已检测到本机 Joyose ${it.second}（appVersion=${it.first}），拉取时优先使用。" }
+                ?: "未检测到本机 Joyose 版本，将按机型探测可用的云端配置。",
+            12,
+            0xff3b6ab5.toInt(),
+        )
+        joyoseHintText.setPadding(dp(10), dp(8), dp(10), dp(8))
+        joyoseHintText.background = rounded(0xfff4f8ff.toInt(), 10, 0xffcfe3ff.toInt())
+        cloud.addView(joyoseHintText)
+        cloud.addView(action("🚀 从云端拉取规则", kind = "primary") { fetchCloudRules() })
 
         val files = panel(
             root,
@@ -255,7 +272,6 @@ class MainActivity : Activity() {
         fileText = text("当前：未载入", 12, 0xff526071.toInt())
         files.addView(fileText)
     }
-
     private fun buildRulesPage(root: LinearLayout) {
         val rulesPanel = panel(root, "规则列表")
         ruleSpinner = Spinner(this)
@@ -311,22 +327,88 @@ class MainActivity : Activity() {
         val templates = panel(
             root,
             "一键策略模板",
-            "模板只改当前载入的规则 JSON。指定游戏包名可只作用于该游戏；留空表示全部。改完后仍需保存并推送到设备。",
+            "模板只改当前载入的规则 JSON。需要指定游戏的模板会弹出包名输入；留空表示全部游戏。改完后仍需保存并推送到设备。",
         )
         packageInput = input("目标游戏包名；留空表示全部", "")
         templates.addView(label("选择目标游戏（包名）"))
         templates.addView(packageInput)
-        templates.addView(action("解锁指定游戏的帧率锁") { applyTemplate(TemplateId.UNLOCK_FPS) })
-        templates.addView(action("放宽所有游戏的温控") { applyTemplate(TemplateId.RELAX_PID) })
-        templates.addView(action("提升指定游戏 CPU 大核基线") { applyTemplate(TemplateId.RAISE_MIGT) })
-        templates.addView(action("移除全局温度降帧表") { applyTemplate(TemplateId.CLEAR_THERMAL) })
-        templates.addView(action("关闭后台冻结") { applyTemplate(TemplateId.DISABLE_BACKGROUND_FREEZE) })
-        templates.addView(action("关闭监控与质量上报") { applyTemplate(TemplateId.DISABLE_TELEMETRY) })
-        templates.addView(action("关闭资源预下载") { applyTemplate(TemplateId.DISABLE_PREDOWNLOAD) })
-        templates.addView(action("禁用 L3 卡顿日志采集") { applyTemplate(TemplateId.DISABLE_L3_LOG) })
-        templates.addView(action("开启 QSync 显示同步（实验性）") { applyTemplate(TemplateId.ENABLE_QSYNC) })
-        templates.addView(action("恢复原始配置") { applyTemplate(TemplateId.RESET) })
-
+        templates.addView(
+            templateCard(
+                "解锁指定游戏的帧率锁",
+                "移除指定游戏的 90fps 帧率锁（留空 = 全部游戏）",
+                "🎯 选择游戏",
+            ) { applyTemplate(TemplateId.UNLOCK_FPS, needsPackage = true) },
+        )
+        templates.addView(
+            templateCard(
+                "放宽所有游戏的温控",
+                "所有策略组温控阈值统一提高到 47°C（发热上升）",
+                "应用",
+            ) { applyTemplate(TemplateId.RELAX_PID) },
+        )
+        templates.addView(
+            templateCard(
+                "提升指定游戏 CPU 大核基线",
+                "指定游戏大核基线提升到 1400MHz（留空 = 全部）",
+                "🎯 选择游戏",
+            ) { applyTemplate(TemplateId.RAISE_MIGT, needsPackage = true) },
+        )
+        templates.addView(
+            templateCard(
+                "提升所有游戏大核基线",
+                "所有游戏大核基线统一提到 1400MHz",
+                "应用",
+            ) { applyTemplate(TemplateId.RAISE_MIGT_ALL) },
+        )
+        templates.addView(
+            templateCard(
+                "移除全局温度降帧表",
+                "清空温度降帧段，温度不再触发全局降帧",
+                "应用",
+            ) { applyTemplate(TemplateId.CLEAR_THERMAL) },
+        )
+        templates.addView(
+            templateCard(
+                "关闭后台冻结",
+                "游戏切后台不绑小核（更耗电但秒恢复）",
+                "应用",
+            ) { applyTemplate(TemplateId.DISABLE_BACKGROUND_FREEZE) },
+        )
+        templates.addView(
+            templateCard(
+                "关闭监控与质量上报",
+                "关闭 monitor 监控/分析上报、清空 MQS 监控名单、关闭扩展功耗采集",
+                "应用",
+            ) { applyTemplate(TemplateId.DISABLE_TELEMETRY) },
+        )
+        templates.addView(
+            templateCard(
+                "关闭资源预下载",
+                "关闭游戏资源预下载（省流量/存储）",
+                "应用",
+            ) { applyTemplate(TemplateId.DISABLE_PREDOWNLOAD) },
+        )
+        templates.addView(
+            templateCard(
+                "禁用 L3 卡顿日志采集",
+                "强制关闭卡顿 trace 采集（隐私+省 CPU/流量）",
+                "应用",
+            ) { applyTemplate(TemplateId.DISABLE_L3_LOG) },
+        )
+        templates.addView(
+            templateCard(
+                "开启 QSync 显示同步（实验性）",
+                "开启高通 QSync 显示同步（厂商默认关闭，未实测兼容性）",
+                "应用",
+            ) { applyTemplate(TemplateId.ENABLE_QSYNC) },
+        )
+        templates.addView(
+            templateCard(
+                "恢复原始配置",
+                "撤销所有修改，恢复原始内容",
+                "应用",
+            ) { applyTemplate(TemplateId.RESET) },
+        )
         val stats = panel(root, "规则统计")
         ruleStatsText = text("未载入规则", 13, 0xff111827.toInt())
         stats.addView(ruleStatsText)
@@ -411,16 +493,73 @@ class MainActivity : Activity() {
             val model = readFastProp("ro.product.marketname").ifBlank { Build.MODEL ?: "-" }
             val miui = readFastProp("ro.miui.ui.version.name").ifBlank { "-" }
             val android = readFastProp("ro.build.version.release").ifBlank { Build.VERSION.RELEASE ?: "-" }
-            val sc = readFastProp("persist.sys.sc_allow_conn").ifBlank { "unknown" }
+            val scRaw = readFastProp("persist.sys.sc_allow_conn").ifBlank { "unknown" }
+            val scAllowed = scRaw == "1" || scRaw.equals("true", ignoreCase = true)
+            val joyose = detectInstalledJoyose()
             ui.post {
-                statusText.text = "机型：$model\n设备代号：$device\n系统：$miui / Android $android\nRoot：${if (rooted) "已获取" else "未获取"}\n云控下发：$sc"
+                renderDeviceStats(model, device, "$miui / Android $android", rooted, scAllowed, scRaw, joyose)
                 if (deviceInput.text.isBlank()) deviceInput.setText(device)
                 if (miuiInput.text.isBlank() || miuiInput.text.toString() == "V816") miuiInput.setText(miui.ifBlank { "V816" })
+                if (joyose != null && (appVersionInput.text.isBlank() || appVersionInput.text.toString() == "477")) {
+                    appVersionInput.setText(joyose.first)
+                }
+                if (::joyoseHintText.isInitialized) {
+                    joyoseHintText.text = joyose?.let {
+                        "已检测到本机 Joyose ${it.second}（appVersion=${it.first}），拉取时优先使用。"
+                    } ?: "未检测到本机 Joyose 版本，将按机型探测可用的云端配置。"
+                }
             }
-            appendLog("Root=${if (rooted) "yes" else "no"}, sc_allow_conn=$sc")
+            appendLog("Root=${if (rooted) "yes" else "no"}, sc_allow_conn=$scRaw, joyose=${joyose?.second ?: "n/a"}")
         }
     }
 
+    private fun renderDeviceStats(
+        model: String,
+        device: String,
+        system: String,
+        rooted: Boolean,
+        scAllowed: Boolean,
+        scRaw: String,
+        joyose: Pair<String, String>?,
+    ) {
+        if (!::deviceStatsBox.isInitialized) return
+        deviceStatsBox.removeAllViews()
+        deviceStatsBox.addView(statRow("机型", model))
+        deviceStatsBox.addView(statRow("设备代号", device))
+        deviceStatsBox.addView(statRow("系统", system))
+        deviceStatsBox.addView(statRow("Root 权限", if (rooted) "已获取" else "未获取", if (rooted) "root" else "noroot"))
+        deviceStatsBox.addView(statRow("云控下发", if (scAllowed) "允许" else if (scRaw == "unknown") "未知" else "已冻结", if (scAllowed) "active" else "frozen"))
+        deviceStatsBox.addView(statRow("Joyose", joyose?.let { "${it.second} (${it.first})" } ?: "未检测到"))
+        statusText.text = ""
+        statusText.visibility = View.GONE
+    }
+
+    private fun statRow(name: String, value: String, badge: String? = null): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        row.setPadding(0, dp(4), 0, dp(4))
+        val left = text(name, 12, 0xff526071.toInt())
+        left.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        row.addView(left)
+        if (badge != null) {
+            val color = when (badge) {
+                "root", "active" -> 0xff1fa365.toInt() to 0xffe8f8ef.toInt()
+                "noroot", "frozen" -> 0xffc2410c.toInt() to 0xfffff1e8.toInt()
+                else -> 0xff111827.toInt() to 0xfff3f6fb.toInt()
+            }
+            val chip = text(value, 12, color.first)
+            chip.setPadding(dp(8), dp(3), dp(8), dp(3))
+            chip.background = rounded(color.second, 8, color.second)
+            chip.typeface = Typeface.DEFAULT_BOLD
+            row.addView(chip)
+        } else {
+            val right = text(value, 13, 0xff111827.toInt())
+            right.typeface = Typeface.DEFAULT_BOLD
+            row.addView(right)
+        }
+        return row
+    }
     private fun pullDeviceDb() {
         runTask("拉取设备配置") {
             if (!Shell.isRooted()) throw IOException("需要 root 权限")
@@ -474,28 +613,115 @@ class MainActivity : Activity() {
     }
 
     private fun fetchCloudRules() {
-        val params = CloudParams(
-            region = regionSpinner.selectedItem.toString(),
-            device = deviceInput.text.toString().trim().ifBlank { "myron" },
-            miuiVersion = miuiInput.text.toString().trim().ifBlank { "V816" },
-            appVersion = appVersionInput.text.toString().trim().ifBlank { "477" },
-            localVersion = localVersionInput.text.toString().trim().ifBlank { "0" },
-            identity = readDeviceIdentityOrNull(),
-        )
+        val region = regionSpinner.selectedItem.toString()
+        val device = deviceInput.text.toString().trim().ifBlank { Build.DEVICE ?: "myron" }
+        val miuiVersion = miuiInput.text.toString().trim().ifBlank { "V816" }
+        val typedAppVersion = appVersionInput.text.toString().trim()
+        val localVersion = localVersionInput.text.toString().trim().ifBlank { "0" }
+        val identity = readDeviceIdentityOrNull()
         runTask("云端拉取") {
-            val result = MccClient.fetch(params)
-            if (result.applyRules.isEmpty()) {
-                appendLog("云端返回 maxVersion=${result.maxVersion}，没有 status=1 的可应用规则")
-                toast("没有可载入的云端规则")
-                return@runTask
+            val installed = detectInstalledJoyose()
+            val preferred = typedAppVersion.ifBlank { installed?.first.orEmpty() }
+            val attempts = linkedSetOf<String>()
+            if (preferred.isNotBlank()) attempts += preferred
+            if (installed != null) attempts += installed.first
+            attempts += "477"
+            var lastError: String? = null
+            var usedVersion: String? = null
+            var result: CloudFetchResult? = null
+            for (ver in attempts) {
+                appendLog("尝试 Joyose appVersion=$ver${if (installed?.first == ver) "（本机）" else ""}")
+                try {
+                    val fetched = MccClient.fetch(
+                        CloudParams(region, device, miuiVersion, ver, localVersion, identity, versionNameFor(ver)),
+                    )
+                    if (fetched.applyRules.isNotEmpty()) {
+                        result = fetched
+                        usedVersion = ver
+                        break
+                    }
+                    lastError = "appVersion=$ver 返回 maxVersion=${fetched.maxVersion}，没有 status=1 的可应用规则"
+                    appendLog(lastError!!)
+                } catch (e: Exception) {
+                    lastError = "appVersion=$ver 失败：${e.message}"
+                    appendLog(lastError!!)
+                }
             }
-            JoyoseDb.buildFromCloudRules(currentDbFile, result.applyRules)
-            loadDbFromFile("云端规则 maxVersion=${result.maxVersion}")
+            if (result == null) {
+                appendLog("本机版本未拉到可用规则，开始按机型 $device 探测最新配置")
+                val probe = probeLatestCloudConfig(region, device, miuiVersion, localVersion, identity)
+                result = probe.first
+                usedVersion = probe.second
+            }
+            val fetched = result ?: throw IOException(lastError ?: "没有可载入的云端规则")
+            if (fetched.applyRules.isEmpty()) throw IOException("没有可载入的云端规则")
+            ui.post { if (usedVersion != null) appVersionInput.setText(usedVersion) }
+            JoyoseDb.buildFromCloudRules(currentDbFile, fetched.applyRules)
+            loadDbFromFile("云端规则 maxVersion=${fetched.maxVersion}")
             updateVersionStatus(JoyoseDb.versionReport(currentDbFile))
-            appendLog("云端拉取成功：${result.applyRules.size} 条规则，maxVersion=${result.maxVersion}")
+            appendLog("云端拉取成功：${fetched.applyRules.size} 条规则，maxVersion=${fetched.maxVersion}，appVersion=$usedVersion")
         }
     }
 
+    private fun probeLatestCloudConfig(
+        region: String,
+        device: String,
+        miuiVersion: String,
+        localVersion: String,
+        identity: DeviceIdentity?,
+    ): Pair<CloudFetchResult, String> {
+        val versions = linkedSetOf<String>()
+        detectInstalledJoyose()?.first?.let { versions += it }
+        versions.addAll(listOf("514", "508", "500", "490", "477", "460", "450"))
+        var best: Pair<CloudFetchResult, String>? = null
+        var lastError: String? = null
+        for (ver in versions) {
+            try {
+                val fetched = MccClient.fetch(
+                    CloudParams(region, device, miuiVersion, ver, localVersion, identity, versionNameFor(ver)),
+                )
+                val booster = fetched.applyRules.count { it.moduleKey.contains("booster", ignoreCase = true) }
+                appendLog("探测 $device appVersion=$ver → rules=${fetched.applyRules.size} booster=$booster maxVersion=${fetched.maxVersion}")
+                if (fetched.applyRules.isEmpty()) continue
+                val currentBest = best
+                if (currentBest == null || fetched.applyRules.size > currentBest.first.applyRules.size ||
+                    (fetched.maxVersion.toLongOrNull() ?: 0L) > (currentBest.first.maxVersion.toLongOrNull() ?: 0L)
+                ) {
+                    best = fetched to ver
+                }
+            } catch (e: Exception) {
+                lastError = e.message
+                appendLog("探测 $device appVersion=$ver 失败：${e.message}")
+            }
+        }
+        return best ?: throw IOException("当前机型 $device 未探测到可用云端配置${lastError?.let { "：$it" } ?: ""}")
+    }
+
+    private fun detectInstalledJoyose(): Pair<String, String>? {
+        val dump = listOf(false, true).asSequence().mapNotNull { asRoot ->
+            runCatching { Shell.run("dumpsys package com.xiaomi.joyose", root = asRoot, timeoutSeconds = 8).stdout }.getOrNull()
+                ?.takeIf { it.contains("versionCode=") || it.contains("versionName=") }
+        }.firstOrNull().orEmpty()
+        val code = Regex("versionCode=(\\d+)").find(dump)?.groupValues?.getOrNull(1)
+        val name = Regex("versionName=([^\\s]+)").find(dump)?.groupValues?.getOrNull(1)
+        if (code.isNullOrBlank() && name.isNullOrBlank()) return null
+        val appVersion = code ?: name!!.filter { it.isDigit() }.takeLast(3).ifBlank { name.filter { it.isDigit() } }
+        if (appVersion.isBlank()) return null
+        return appVersion to (name ?: appVersion)
+    }
+    private fun versionNameFor(appVersion: String): String {
+        val digits = appVersion.filter { it.isDigit() }
+        return when {
+            digits == "477" -> "2.4.77"
+            digits.length >= 3 -> {
+                val rest = digits.takeLast(3)
+                val minor = rest.substring(0, 1)
+                val patch = rest.substring(1)
+                "2.$minor.$patch"
+            }
+            else -> "2.4.77"
+        }
+    }
     private fun importDb(uri: Uri) {
         runTask("导入本地文件") {
             val imported = File(filesDir, "joyctl_import.tmp")
@@ -654,14 +880,21 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun applyTemplate(id: TemplateId) {
+    private fun applyTemplate(id: TemplateId, needsPackage: Boolean = false) {
         val rule = activeRule
         if (rule == null || editor.text.isBlank()) {
             toast("请先载入规则")
             return
         }
+        val pkg = packageInput.text.toString().trim()
+        if (needsPackage && pkg.isEmpty() && pendingTemplate != id) {
+            pendingTemplate = id
+            packageInput.requestFocus()
+            toast("请填写目标游戏包名后再次点击；留空则应用到全部游戏")
+            return
+        }
+        pendingTemplate = null
         try {
-            val pkg = packageInput.text.toString().trim()
             val result = Templates.apply(id, editor.text.toString(), originalRuleJson, pkg)
             loadingEditor = true
             editor.setText(prettyJson(result.json))
@@ -674,7 +907,6 @@ class MainActivity : Activity() {
             toast("模板失败：${e.message}")
         }
     }
-
     private fun reloadCurrentRule() {
         val rule = activeRule ?: run {
             toast("请先载入规则")
@@ -930,11 +1162,31 @@ class MainActivity : Activity() {
         return box
     }
 
-    private fun action(label: String, onClick: () -> Unit): Button {
+    private fun templateCard(name: String, desc: String, button: String, onClick: () -> Unit): LinearLayout {
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.setPadding(dp(12), dp(10), dp(12), dp(12))
+        card.background = rounded(0xfff8fbff.toInt(), 12, 0xffdbe7f5.toInt())
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(8), 0, 0)
+        card.layoutParams = lp
+        card.addView(title(name, 14))
+        val descView = text(desc, 12, 0xff6b7280.toInt())
+        val descLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        descLp.setMargins(0, dp(4), 0, dp(8))
+        card.addView(descView, descLp)
+        card.addView(action(button, kind = "primary", onClick = onClick).also {
+            (it.layoutParams as LinearLayout.LayoutParams).setMargins(0, 0, 0, 0)
+        })
+        return card
+    }
+
+    private fun action(label: String, kind: String = "default", onClick: () -> Unit): Button {
         val b = Button(this)
         b.text = label
         b.isAllCaps = false
         b.setTextSize(13f)
+        styleButton(b, kind)
         b.setOnClickListener { onClick() }
         val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.setMargins(0, dp(8), 0, 0)
@@ -943,14 +1195,25 @@ class MainActivity : Activity() {
         return b
     }
 
-    private fun rowAction(label: String, onClick: () -> Unit): Button {
-        return action(label, onClick).also {
+    private fun rowAction(label: String, kind: String = "default", onClick: () -> Unit): Button {
+        return action(label, kind, onClick).also {
             val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             lp.setMargins(0, dp(8), dp(8), 0)
             it.layoutParams = lp
         }
     }
 
+    private fun styleButton(b: Button, kind: String) {
+        val (bg, fg, stroke) = when (kind) {
+            "primary" -> Triple(0xff4f8cff.toInt(), Color.WHITE, 0xff4f8cff.toInt())
+            "success" -> Triple(0xffe8f8ef.toInt(), 0xff1fa365.toInt(), 0xffb7ebc6.toInt())
+            else -> Triple(0xffeef5ff.toInt(), 0xff1d4ed8.toInt(), 0xffcfe3ff.toInt())
+        }
+        b.background = rounded(bg, 10, stroke)
+        b.setTextColor(fg)
+        b.typeface = Typeface.DEFAULT_BOLD
+        b.minHeight = dp(42)
+    }
     private fun input(hint: String, initial: String): EditText {
         val e = EditText(this)
         e.hint = hint
@@ -1302,8 +1565,8 @@ data class CloudParams(
     val appVersion: String,
     val localVersion: String,
     val identity: DeviceIdentity?,
+    val versionName: String = "2.4.77",
 )
-
 data class CloudFetchResult(val maxVersion: String, val applyRules: List<CloudRule>)
 
 object MccClient {
@@ -1332,7 +1595,7 @@ object MccClient {
         val params = linkedMapOf(
             "packageName" to "com.xiaomi.joyose",
             "appVersion" to p.appVersion,
-            "versionName" to "2.4.77",
+            "versionName" to p.versionName,
             "deviceInfo" to deviceInfo,
             "version" to p.localVersion,
         )
@@ -1420,6 +1683,7 @@ enum class TemplateId {
     UNLOCK_FPS,
     RELAX_PID,
     RAISE_MIGT,
+    RAISE_MIGT_ALL,
     CLEAR_THERMAL,
     DISABLE_BACKGROUND_FREEZE,
     DISABLE_TELEMETRY,
@@ -1428,7 +1692,6 @@ enum class TemplateId {
     ENABLE_QSYNC,
     RESET,
 }
-
 data class TemplateResult(val message: String, val json: String)
 
 object Templates {
@@ -1437,6 +1700,7 @@ object Templates {
             TemplateId.UNLOCK_FPS -> unlockFps(current, pkg)
             TemplateId.RELAX_PID -> relaxPid(current)
             TemplateId.RAISE_MIGT -> raiseMigt(current, pkg)
+            TemplateId.RAISE_MIGT_ALL -> raiseMigt(current, "")
             TemplateId.CLEAR_THERMAL -> clearThermal(current)
             TemplateId.DISABLE_BACKGROUND_FREEZE -> editBooster(current, "后台冻结已关闭") { it.put("background_freeze_enable", false) }
             TemplateId.DISABLE_TELEMETRY -> disableTelemetry(current)
