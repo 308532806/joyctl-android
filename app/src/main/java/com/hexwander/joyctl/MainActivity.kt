@@ -123,6 +123,9 @@ class MainActivity : Activity() {
     private var activeRule: RuleInfo? = null
     private var originalRuleJson = ""
     private val originalByRuleId = mutableMapOf<Long, String>()
+    private val baselineByRuleId = mutableMapOf<Long, String>()
+    private var baselineFile: File? = null
+    private var baselineLabel = "未设置对照"
     private var baselineRuleJson = ""
     private var loadingEditor = false
     private var dirty = false
@@ -708,6 +711,7 @@ class MainActivity : Activity() {
             if (fetched.applyRules.isEmpty()) throw IOException("没有可载入的云端规则")
             ui.post { if (usedVersion != null) appVersionInput.setText(usedVersion) }
             JoyoseDb.buildFromCloudRules(currentDbFile, fetched.applyRules)
+            snapshotBaselineFromCurrentDb("云端未修改配置")
             loadDbFromFile("云端规则 maxVersion=${fetched.maxVersion}")
             updateVersionStatus(JoyoseDb.versionReport(currentDbFile))
             val modules = fetched.applyRules.groupBy { it.moduleKey.ifBlank { "(空)" } }
@@ -871,10 +875,66 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun snapshotBaselineFromCurrentDb(label: String) {
+        val dest = File(filesDir, "teg_config_baseline.db")
+        currentDbFile.copyTo(dest, overwrite = true)
+        baselineFile = dest
+        loadBaselineMap(dest, label)
+    }
+
+    private fun loadBaselineMap(file: File, label: String) {
+        baselineByRuleId.clear()
+        runCatching {
+            JoyoseDb.readAllRuleContents(file).forEach { (rule, content) ->
+                baselineByRuleId[rule.ruleId] = content
+            }
+            baselineFile = file
+            baselineLabel = label
+        }.onFailure {
+            baselineLabel = "对照读取失败"
+            appendLog("对照配置读取失败：${it.message}")
+        }
+    }
+
+    private fun latestBackup(prefix: String): File? {
+        return filesDir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith("teg_config_${prefix}_") && it.name.endsWith(".db") }
+            ?.maxByOrNull { it.lastModified() }
+    }
+
+    private fun captureBaselineFromCurrentDb(label: String) {
+        when {
+            label.startsWith("云端规则") -> {
+                val existing = baselineFile
+                if (existing != null && existing.exists() && baselineLabel == "云端未修改配置" && baselineByRuleId.isNotEmpty()) {
+                    return
+                }
+                snapshotBaselineFromCurrentDb("云端未修改配置")
+            }
+            label == "设备配置" -> {
+                val bak = latestBackup("device-pull")
+                if (bak != null) loadBaselineMap(bak, "设备原始备份")
+                else snapshotBaselineFromCurrentDb("设备原始备份")
+            }
+            label == "导入文件" -> {
+                val bak = latestBackup("import")
+                if (bak != null) loadBaselineMap(bak, "导入文件原始备份")
+                else snapshotBaselineFromCurrentDb("导入文件原始备份")
+            }
+            label == "JSON 规则文件" -> {
+                val bak = latestBackup("json-import")
+                if (bak != null) loadBaselineMap(bak, "导入 JSON 原始备份")
+                else snapshotBaselineFromCurrentDb("导入 JSON 原始备份")
+            }
+            else -> snapshotBaselineFromCurrentDb("载入时的原始配置")
+        }
+    }
+
     private fun loadDbFromFile(label: String) {
         JoyoseDb.validate(currentDbFile)
         val loaded = JoyoseDb.readRules(currentDbFile)
         currentLabel = label
+        captureBaselineFromCurrentDb(label)
         val firstContent = loaded.firstOrNull()?.let { JoyoseDb.readRuleContent(currentDbFile, it.ruleId) }
         ui.post {
             rules.clear()
@@ -915,7 +975,7 @@ class MainActivity : Activity() {
         val ruleId = activeRule?.ruleId
         val original = if (ruleId != null) originalByRuleId.getOrPut(ruleId) { content } else content
         originalRuleJson = original
-        baselineRuleJson = original
+        baselineRuleJson = if (ruleId != null) baselineByRuleId[ruleId] ?: original else original
         loadingEditor = true
         editor.setText(prettyJson(content))
         loadingEditor = false
@@ -1271,22 +1331,9 @@ class MainActivity : Activity() {
             ruleListHint.text = "尚未载入规则。请先到「设备」拉取配置，或到「云端」拉取规则。"
             return
         }
-        ruleListHint.visibility = View.GONE
-        if (rules.size > 1) {
-            val nav = row()
-            nav.addView(rowAction("← 上一条") {
-                val i = rules.indexOfFirst { it.ruleId == activeRule?.ruleId }.let { if (it < 0) 0 else it }
-                selectRuleAt(if (i <= 0) rules.lastIndex else i - 1)
-            })
-            nav.addView(rowAction("下一条 →") {
-                val i = rules.indexOfFirst { it.ruleId == activeRule?.ruleId }.let { if (it < 0) 0 else it }
-                selectRuleAt(if (i >= rules.lastIndex) 0 else i + 1)
-            })
-            ruleListBox.addView(nav)
-        }
         val selectedChanged = activeRule?.ruleId?.let { rid ->
             val current = if (::editor.isInitialized) editor.text.toString() else ""
-            val original = originalByRuleId[rid] ?: originalRuleJson
+            val original = baselineByRuleId[rid] ?: baselineRuleJson
             current.isNotBlank() && JoyoseDb.featureRows(current, original).any { it.changed }
         } ?: false
         rules.forEachIndexed { index, rule ->
@@ -1388,14 +1435,15 @@ class MainActivity : Activity() {
             featureSummaryBox.addView(text("未载入规则", 13, 0xff64748b.toInt()))
             return
         }
-        val rows = JoyoseDb.featureRows(content, originalRuleJson.takeIf { it.isNotBlank() })
+        val baseline = activeRule?.ruleId?.let { baselineByRuleId[it] } ?: baselineRuleJson
+        val rows = JoyoseDb.featureRows(content, baseline.takeIf { it.isNotBlank() })
         if (rows.isEmpty()) {
             featureSummaryBox.addView(text("当前规则不是合法 JSON，无法识别功能", 13, 0xffb91c1c.toInt()))
             return
         }
         val changedCount = rows.count { it.changed }
         val summary = text(
-            "对照原始规则：已改 $changedCount 项，未改 ${rows.size - changedCount} 项",
+            "对照$baselineLabel：已改 $changedCount 项，未改 ${rows.size - changedCount} 项",
             12,
             0xff334155.toInt(),
         )
