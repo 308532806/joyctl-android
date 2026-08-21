@@ -906,7 +906,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun pickGameThenApply(id: TemplateId) {
+    private fun pickGameThenApply(templateId: TemplateId) {
         if (activeRule == null || editor.text.isBlank()) {
             toast("请先载入规则")
             return
@@ -915,14 +915,14 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val apps = listInstalledApps()
-                ui.post { showGamePicker(id, apps) }
+                ui.post { showGamePicker(templateId, apps) }
             } catch (t: Throwable) {
                 toast("读取应用列表失败：${t.message ?: t.javaClass.simpleName}")
             }
         }
     }
 
-    private fun showGamePicker(id: TemplateId, apps: List<InstalledApp>) {
+    private fun showGamePicker(templateId: TemplateId, apps: List<InstalledApp>) {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(16), dp(4), dp(16), dp(4))
@@ -948,13 +948,13 @@ class MainActivity : Activity() {
                     it.orientation = LinearLayout.VERTICAL
                     it.setPadding(dp(4), dp(10), dp(4), dp(10))
                     it.addView(TextView(context).apply {
-                        id = android.R.id.text1
+                        this.id = android.R.id.text1
                         setTextSize(15f)
                         setTextColor(0xff111827.toInt())
                         typeface = Typeface.DEFAULT_BOLD
                     })
                     it.addView(TextView(context).apply {
-                        id = android.R.id.text2
+                        this.id = android.R.id.text2
                         setTextSize(11f)
                         setTextColor(0xff6b7280.toInt())
                     })
@@ -999,7 +999,7 @@ class MainActivity : Activity() {
             .setView(box)
             .setNeutralButton("全部游戏") { _, _ ->
                 packageInput.setText("")
-                applyTemplate(id, pkg = "")
+                applyTemplate(templateId, pkg = "")
             }
             .setNegativeButton("取消", null)
             .create()
@@ -1007,7 +1007,7 @@ class MainActivity : Activity() {
             val item = adapter.getItem(position) ?: return@setOnItemClickListener
             packageInput.setText(item.packageName)
             dialog.dismiss()
-            applyTemplate(id, pkg = item.packageName)
+            applyTemplate(templateId, pkg = item.packageName)
         }
         dialog.show()
     }
@@ -1082,14 +1082,14 @@ class MainActivity : Activity() {
         ).any { p.contains(it) }
     }
 
-    private fun applyTemplate(id: TemplateId, pkg: String = packageInput.text.toString().trim()) {
+    private fun applyTemplate(templateId: TemplateId, pkg: String = packageInput.text.toString().trim()) {
         val rule = activeRule
         if (rule == null || editor.text.isBlank()) {
             toast("请先载入规则")
             return
         }
         try {
-            val result = Templates.apply(id, editor.text.toString(), originalRuleJson, pkg)
+            val result = Templates.apply(templateId, editor.text.toString(), originalRuleJson, pkg)
             loadingEditor = true
             editor.setText(prettyJson(result.json))
             loadingEditor = false
