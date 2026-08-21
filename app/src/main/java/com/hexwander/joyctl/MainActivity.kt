@@ -1,6 +1,9 @@
 package com.hexwander.joyctl
 
 import android.app.Activity
+import android.app.AlertDialog
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.ContentValues
 import android.content.res.ColorStateList
 import android.content.Intent
@@ -28,6 +31,7 @@ import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -55,6 +59,11 @@ data class RuleInfo(
     val version: Long,
     val module: String,
     val contentLength: Long,
+)
+
+data class InstalledApp(
+    val packageName: String,
+    val label: String,
 )
 
 data class CloudRule(
@@ -104,7 +113,8 @@ class MainActivity : Activity() {
     private var dirty = false
     private var currentLabel = "未载入"
     private var activeJoyoseDbPath = JOYOSE_DB_DEFAULT
-    private var pendingTemplate: TemplateId? = null
+    private var installedAppCache: List<InstalledApp>? = null
+    @Volatile private var installedAppCacheAt = 0L
 
     private val currentDbFile: File by lazy { File(filesDir, "teg_config_work.db") }
 
@@ -334,7 +344,7 @@ class MainActivity : Activity() {
         val templates = panel(
             root,
             "一键策略模板",
-            "模板只改当前载入的规则 JSON。需要指定游戏的模板会弹出包名输入；留空表示全部游戏。改完后仍需保存并推送到设备。",
+            "模板只改当前载入的规则 JSON。需要指定游戏的模板会列出本机应用（名称+包名）供选择；也可应用到全部游戏。改完后仍需保存并推送到设备。",
         )
         packageInput = input("目标游戏包名；留空表示全部", "")
         templates.addView(label("选择目标游戏（包名）"))
@@ -344,7 +354,7 @@ class MainActivity : Activity() {
                 "解锁指定游戏的帧率锁",
                 "移除指定游戏的 90fps 帧率锁（留空 = 全部游戏）",
                 "🎯 选择游戏",
-            ) { applyTemplate(TemplateId.UNLOCK_FPS, needsPackage = true) },
+            ) { pickGameThenApply(TemplateId.UNLOCK_FPS) },
         )
         templates.addView(
             templateCard(
@@ -358,7 +368,7 @@ class MainActivity : Activity() {
                 "提升指定游戏 CPU 大核基线",
                 "指定游戏大核基线提升到 1400MHz（留空 = 全部）",
                 "🎯 选择游戏",
-            ) { applyTemplate(TemplateId.RAISE_MIGT, needsPackage = true) },
+            ) { pickGameThenApply(TemplateId.RAISE_MIGT) },
         )
         templates.addView(
             templateCard(
@@ -896,20 +906,188 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun applyTemplate(id: TemplateId, needsPackage: Boolean = false) {
+    private fun pickGameThenApply(id: TemplateId) {
+        if (activeRule == null || editor.text.isBlank()) {
+            toast("请先载入规则")
+            return
+        }
+        toast("正在读取本机应用列表…")
+        worker.execute {
+            try {
+                val apps = listInstalledApps()
+                ui.post { showGamePicker(id, apps) }
+            } catch (t: Throwable) {
+                toast("读取应用列表失败：${t.message ?: t.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private fun showGamePicker(id: TemplateId, apps: List<InstalledApp>) {
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        box.setPadding(dp(16), dp(4), dp(16), dp(4))
+
+        val hint = text(
+            "已读取 ${apps.size} 个应用（名称 + 包名）。可搜索后点选，或直接应用到全部游戏。",
+            12,
+            0xff6b7280.toInt(),
+        )
+        box.addView(hint)
+
+        val search = input("搜索应用名或包名", packageInput.text.toString())
+        search.minHeight = dp(44)
+        search.background = rounded(0xfff8fbff.toInt(), 8, 0xffdbe7f5.toInt())
+        val searchLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        searchLp.setMargins(0, dp(8), 0, dp(8))
+        box.addView(search, searchLp)
+
+        val visible = apps.toMutableList()
+        val adapter = object : ArrayAdapter<InstalledApp>(this, android.R.layout.simple_list_item_2, android.R.id.text1, visible) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = (convertView as? LinearLayout) ?: LinearLayout(context).also {
+                    it.orientation = LinearLayout.VERTICAL
+                    it.setPadding(dp(4), dp(10), dp(4), dp(10))
+                    it.addView(TextView(context).apply {
+                        id = android.R.id.text1
+                        setTextSize(15f)
+                        setTextColor(0xff111827.toInt())
+                        typeface = Typeface.DEFAULT_BOLD
+                    })
+                    it.addView(TextView(context).apply {
+                        id = android.R.id.text2
+                        setTextSize(11f)
+                        setTextColor(0xff6b7280.toInt())
+                    })
+                }
+                val item = getItem(position) ?: return row
+                row.findViewById<TextView>(android.R.id.text1).text = item.label
+                row.findViewById<TextView>(android.R.id.text2).text = item.packageName
+                return row
+            }
+        }
+
+        fun applyFilter(raw: String) {
+            val key = raw.trim()
+            visible.clear()
+            if (key.isEmpty()) {
+                visible.addAll(apps)
+            } else {
+                visible.addAll(
+                    apps.filter {
+                        it.label.contains(key, ignoreCase = true) || it.packageName.contains(key, ignoreCase = true)
+                    },
+                )
+            }
+            adapter.notifyDataSetChanged()
+        }
+        applyFilter(search.text.toString())
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                applyFilter(s?.toString().orEmpty())
+            }
+        })
+
+        val list = ListView(this)
+        list.adapter = adapter
+        list.dividerHeight = 1
+        box.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(360)))
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("🎯 选择目标游戏")
+            .setView(box)
+            .setNeutralButton("全部游戏") { _, _ ->
+                packageInput.setText("")
+                applyTemplate(id, pkg = "")
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        list.setOnItemClickListener { _, _, position, _ ->
+            val item = adapter.getItem(position) ?: return@setOnItemClickListener
+            packageInput.setText(item.packageName)
+            dialog.dismiss()
+            applyTemplate(id, pkg = item.packageName)
+        }
+        dialog.show()
+    }
+
+    private fun listInstalledApps(): List<InstalledApp> {
+        installedAppCache?.let { cached ->
+            if (System.currentTimeMillis() - installedAppCacheAt < 60_000L) return cached
+        }
+        val pm = packageManager
+        if (Shell.isRooted()) {
+            runCatching { Shell.run("pm grant $packageName com.android.permission.GET_INSTALLED_APPS", root = true, timeoutSeconds = 3) }
+        }
+        val seen = LinkedHashMap<String, InstalledApp>()
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolveInfos = if (Build.VERSION.SDK_INT >= 33) {
+            pm.queryIntentActivities(launcher, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(launcher, 0)
+        }
+        for (info in resolveInfos) {
+            val pkg = info.activityInfo?.packageName?.trim().orEmpty()
+            if (pkg.isEmpty() || seen.containsKey(pkg)) continue
+            val label = info.loadLabel(pm)?.toString()?.trim().orEmpty().ifBlank { pkg }
+            seen[pkg] = InstalledApp(pkg, label)
+        }
+        run {
+            val flags = PackageManager.MATCH_UNINSTALLED_PACKAGES
+            val installed = if (Build.VERSION.SDK_INT >= 33) {
+                pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(flags.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getInstalledApplications(flags)
+            }
+            for (app in installed) {
+                val pkg = app.packageName?.trim().orEmpty()
+                if (pkg.isEmpty() || seen.containsKey(pkg)) continue
+                val systemOnly = app.flags and ApplicationInfo.FLAG_SYSTEM != 0 &&
+                    app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP == 0
+                if (systemOnly) continue
+                val label = runCatching { pm.getApplicationLabel(app).toString().trim() }.getOrDefault(pkg).ifBlank { pkg }
+                seen[pkg] = InstalledApp(pkg, label)
+            }
+        }
+        if (Shell.isRooted()) {
+            val pkgs = Shell.run("pm list packages -3 --user 0", root = true, timeoutSeconds = 8).stdout
+                .lineSequence()
+                .map { it.removePrefix("package:").trim() }
+                .filter { it.contains('.') }
+            for (pkg in pkgs) {
+                if (seen.containsKey(pkg)) continue
+                val label = runCatching {
+                    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString().trim()
+                }.getOrDefault(pkg).ifBlank { pkg }
+                seen[pkg] = InstalledApp(pkg, label)
+            }
+        }
+        val result = seen.values.sortedWith(
+            compareByDescending<InstalledApp> { likelyGame(it.packageName) }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.label },
+        )
+        installedAppCache = result
+        installedAppCacheAt = System.currentTimeMillis()
+        return result
+    }
+
+    private fun likelyGame(pkg: String): Boolean {
+        val p = pkg.lowercase(Locale.US)
+        return listOf(
+            "tmgp", "mihoyo", "hoyoverse", "netease", "huanle", "game", "games",
+            "sgame", "pubg", "yuanshen", "genshin", "honkai", "unity3d", "netease.g",
+        ).any { p.contains(it) }
+    }
+
+    private fun applyTemplate(id: TemplateId, pkg: String = packageInput.text.toString().trim()) {
         val rule = activeRule
         if (rule == null || editor.text.isBlank()) {
             toast("请先载入规则")
             return
         }
-        val pkg = packageInput.text.toString().trim()
-        if (needsPackage && pkg.isEmpty() && pendingTemplate != id) {
-            pendingTemplate = id
-            packageInput.requestFocus()
-            toast("请填写目标游戏包名后再次点击；留空则应用到全部游戏")
-            return
-        }
-        pendingTemplate = null
         try {
             val result = Templates.apply(id, editor.text.toString(), originalRuleJson, pkg)
             loadingEditor = true
@@ -923,6 +1101,7 @@ class MainActivity : Activity() {
             toast("模板失败：${e.message}")
         }
     }
+
     private fun reloadCurrentRule() {
         val rule = activeRule ?: run {
             toast("请先载入规则")
