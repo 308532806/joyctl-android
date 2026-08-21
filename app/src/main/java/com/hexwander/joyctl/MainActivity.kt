@@ -233,7 +233,7 @@ class MainActivity : Activity() {
         val status = panel(
             root,
             "设备管理",
-            "安卓端直接通过 su 读取本机 Joyose 数据库，不需要 PC 侧 adb。推送前会校验 SQLite 结构，推送后会回读设备端 DB 复核。\n\n冻结云控会设置 persist.sys.sc_allow_conn=0 并停止 Joyose，防止 MCC 云端规则覆盖本地修改。",
+            "安卓端直接通过 su 读取本机 Joyose 数据库，不需要 PC 侧 adb。推送前会校验 SQLite 结构，推送后会回读设备端 DB 复核。\n\n冻结云控会设置 persist.sys.sc_allow_conn=0 并停止 Joyose，防止 MCC 云端规则覆盖本地修改。\n\n「恢复官方 Joyose」会清空 Joyose 及相关系统应用数据并重新启用云控接收器，仅在异常时使用，本地修改会丢失。",
         )
         deviceStatsBox = LinearLayout(this).also {
             it.orientation = LinearLayout.VERTICAL
@@ -251,6 +251,7 @@ class MainActivity : Activity() {
         cloudRow.addView(rowAction("🧊 冻结云控") { switchCloud(false) })
         cloudRow.addView(rowAction("☀️ 恢复云控") { switchCloud(true) })
         status.addView(cloudRow)
+        status.addView(action("🧯 恢复官方 Joyose（异常时使用）", kind = "danger") { confirmRestoreOfficialJoyose() })
         status.addView(action("🔄 刷新状态") { refreshStatus() })
 
         val versionPanel = panel(
@@ -460,7 +461,7 @@ class MainActivity : Activity() {
         )
         featureSummaryBox = LinearLayout(this).also { it.orientation = LinearLayout.VERTICAL }
         features.addView(featureSummaryBox)
-        renderFeatureSummary(null)
+            renderFeatureSummary(null)
     }
 
     private fun buildLogPage(root: LinearLayout) {
@@ -656,6 +657,61 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun confirmRestoreOfficialJoyose() {
+        AlertDialog.Builder(this)
+            .setTitle("恢复官方 Joyose")
+            .setMessage(
+                "这会清空 Joyose、HTML 查看器、系统守护、电量和安全中心的应用数据，并重新启用云控接收器、发送开机广播。\n\n本地已修改的云控配置会丢失，仅在 Joyose 异常时使用。"
+            )
+            .setPositiveButton("继续恢复") { _, _ -> restoreOfficialJoyose() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun restoreOfficialJoyose() {
+        runTask("恢复官方 Joyose") {
+            if (!Shell.isRooted()) throw IOException("需要 root 权限")
+            val commands = listOf(
+                "pm clear com.xiaomi.joyose",
+                "pm clear com.android.htmlviewer",
+                "pm clear com.miui.daemon",
+                "pm clear com.miui.powerkeeper",
+                "pm clear com.miui.securitycenter",
+                "am force-stop com.xiaomi.joyose",
+                "pm enable com.xiaomi.joyose/com.xiaomi.joyose.cloud.CloudServerReceiver",
+                "am broadcast -a android.intent.action.BOOT_COMPLETED -p com.xiaomi.joyose",
+                "am broadcast com.xiaomi.joyose/com.xiaomi.joyose.cloud.CloudServerReceiver",
+                "am broadcast com.xiaomi.joyose/com.xiaomi.joyose.JoyoseBroadCastReceiver",
+                "am broadcast -a android.intent.action.BOOT_COMPLETED -n com.xiaomi.joyose/com.xiaomi.joyose.JoyoseBroadCastReceiver",
+            )
+            val ws = Regex("\\s+")
+            val details = StringBuilder()
+            var failed = 0
+            commands.forEach { cmd ->
+                val result = Shell.run(cmd, root = true, timeoutSeconds = 30)
+                val out = (result.stdout + "\n" + result.stderr).trim().replace(ws, " ")
+                val ok = result.code == 0
+                if (!ok) failed++
+                val line = if (out.isBlank()) {
+                    "$cmd → exit ${result.code}"
+                } else {
+                    "$cmd → exit ${result.code}: ${out.take(180)}"
+                }
+                details.append(if (ok) "• $line\n" else "• 失败 $line\n")
+                appendLog(if (ok) "info" else "warn", if (ok) "已执行 $cmd" else "执行失败 $cmd", out.take(500))
+            }
+            Shell.run("setprop persist.sys.sc_allow_conn 1", root = true, timeoutSeconds = 8)
+            propCache.remove("persist.sys.sc_allow_conn")
+            joyoseCache = null
+            if (failed > 0) {
+                appendLog("warn", "官方 Joyose 恢复完成，但有 $failed 步未成功", details.toString().trim())
+            } else {
+                appendLog("ok", "官方 Joyose 已恢复", details.toString().trim())
+            }
+            refreshStatusNow()
+        }
+    }
+
     private fun switchCloud(enabled: Boolean) {
         runTask(if (enabled) "恢复云控" else "冻结云控") {
             if (!Shell.isRooted()) throw IOException("需要 root 权限")
@@ -664,7 +720,7 @@ class MainActivity : Activity() {
             propCache.remove("persist.sys.sc_allow_conn")
             val verified = readFastProp("persist.sys.sc_allow_conn")
             appendLog("persist.sys.sc_allow_conn=$verified")
-            refreshStatus()
+            refreshStatusNow()
         }
     }
 
@@ -909,7 +965,6 @@ class MainActivity : Activity() {
         loadBaselineMap(dest, "云端未修改配置 appVersion=$appVersion")
         ui.post {
             if (::editor.isInitialized) updateRuleStats(editor.text.toString())
-            renderRuleList()
         }
     }
 
@@ -992,16 +1047,16 @@ class MainActivity : Activity() {
 
     private fun loadDbFromFile(label: String) {
         JoyoseDb.validate(currentDbFile)
-        val loaded = JoyoseDb.readRules(currentDbFile)
+        val loadedRows = JoyoseDb.readAllRuleContents(currentDbFile)
+        val loaded = loadedRows.map { it.first }
         currentLabel = label
         captureBaselineFromCurrentDb(label)
-        val firstContent = loaded.firstOrNull()?.let { JoyoseDb.readRuleContent(currentDbFile, it.ruleId) }
+        val firstContent = loadedRows.firstOrNull()?.second
         ui.post {
             rules.clear()
             originalByRuleId.clear()
             rules.addAll(loaded)
             fileText.text = "当前：$label，${currentDbFile.length()} bytes，${loaded.size} 条规则"
-            renderRuleList()
             if (loaded.isNotEmpty() && firstContent != null) {
                 activeRule = loaded.first()
                 showRule(firstContent)
@@ -1016,9 +1071,11 @@ class MainActivity : Activity() {
                 baselineRuleJson = ""
                 renderFeatureSummary(null)
                 updateRuleStats(null)
+                renderRuleList()
             }
         }
     }
+
 
     private fun loadRule(rule: RuleInfo) {
         if (!currentDbFile.exists()) return
@@ -1059,7 +1116,6 @@ class MainActivity : Activity() {
         dirty = false
         updateDirtyText()
         updateRuleStats(content)
-        renderRuleList()
     }
 
     private fun saveCurrentRuleFromUi(showToast: Boolean): Boolean {
@@ -1399,7 +1455,7 @@ class MainActivity : Activity() {
             .filter { it.isNotEmpty() }
             .distinct()
     }
-    private fun renderRuleList() {
+    private fun renderRuleList(selectedChanged: Boolean? = null) {
         if (!::ruleListBox.isInitialized) return
         ruleListBox.removeAllViews()
         if (!::ruleListHint.isInitialized) return
@@ -1408,14 +1464,14 @@ class MainActivity : Activity() {
             ruleListHint.text = "尚未载入规则。请先到「设备」拉取配置，或到「云端」拉取规则。"
             return
         }
-        val selectedChanged = activeRule?.ruleId?.let { rid ->
+        val changed = selectedChanged ?: run {
             val current = if (::editor.isInitialized) editor.text.toString() else ""
             val original = resolveBaselineContent(activeRule, baselineRuleJson)
             current.isNotBlank() && JoyoseDb.featureRows(current, original).any { it.changed }
-        } ?: false
+        }
         rules.forEachIndexed { index, rule ->
             val selected = rule.ruleId == activeRule?.ruleId
-            ruleListBox.addView(ruleListCard(rule, index, selected, selected && selectedChanged))
+            ruleListBox.addView(ruleListCard(rule, index, selected, selected && changed))
         }
     }
 
@@ -1505,18 +1561,18 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun renderFeatureSummary(content: String?) {
-        if (!::featureSummaryBox.isInitialized) return
+    private fun renderFeatureSummary(content: String?): Boolean {
+        if (!::featureSummaryBox.isInitialized) return false
         featureSummaryBox.removeAllViews()
         if (content.isNullOrBlank()) {
             featureSummaryBox.addView(text("未载入规则", 13, 0xff64748b.toInt()))
-            return
+            return false
         }
         val baseline = resolveBaselineContent(activeRule, baselineRuleJson)
         val rows = JoyoseDb.featureRows(content, baseline.takeIf { it.isNotBlank() })
         if (rows.isEmpty()) {
             featureSummaryBox.addView(text("当前规则不是合法 JSON，无法识别功能", 13, 0xffb91c1c.toInt()))
-            return
+            return false
         }
         val changedCount = rows.count { it.changed }
         val summary = text(
@@ -1531,6 +1587,7 @@ class MainActivity : Activity() {
         rows.forEach { row ->
             featureSummaryBox.addView(featureRowCard(row))
         }
+        return rows.any { it.changed }
     }
 
     private fun featureRowCard(row: JoyoseDb.FeatureRow): LinearLayout {
@@ -1616,9 +1673,10 @@ class MainActivity : Activity() {
             "当前规则不是可统计的 JSON\n规则模块：${rule.module}\nrule_id：${rule.ruleId} · v${rule.version}"
         }
         ruleStatsText.text = stats
-        renderFeatureSummary(content)
-        renderRuleList()
+        val anyChanged = renderFeatureSummary(content)
+        renderRuleList(anyChanged)
     }
+
 
     private fun updateVersionStatus(report: String) {
         ui.post {
@@ -1988,6 +2046,7 @@ class MainActivity : Activity() {
         val (bg, fg, stroke) = when (kind) {
             "primary" -> Triple(0xff4f8cff.toInt(), Color.WHITE, 0xff4f8cff.toInt())
             "success" -> Triple(0xffe8f8ef.toInt(), 0xff1fa365.toInt(), 0xffb7ebc6.toInt())
+            "danger" -> Triple(0xfffef2f2.toInt(), 0xffb91c1c.toInt(), 0xfffecaca.toInt())
             else -> Triple(0xffeef5ff.toInt(), 0xff1d4ed8.toInt(), 0xffcfe3ff.toInt())
         }
         val content = rounded(bg, 10, stroke)
@@ -2155,8 +2214,22 @@ object JoyoseDb {
     }
 
     fun readAllRuleContents(file: File): List<Pair<RuleInfo, String>> {
-        val rules = readRules(file)
-        return rules.map { it to readRuleContent(file, it.ruleId) }
+        val db = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            val out = mutableListOf<Pair<RuleInfo, String>>()
+            db.rawQuery(
+                "SELECT rule_id, rule_version, rule_module, length(rule_content), rule_content FROM rules ORDER BY rule_version DESC",
+                null,
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val rule = RuleInfo(c.getLong(0), c.getLong(1), c.getString(2), c.getLong(3))
+                    out.add(rule to (c.getString(4) ?: ""))
+                }
+            }
+            return out
+        } finally {
+            db.close()
+        }
     }
 
     fun readRuleContent(file: File, ruleId: Long): String {

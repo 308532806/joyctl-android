@@ -17,6 +17,7 @@ JoyCtl Android 是基于 [hexwander/joyctl](https://github.com/hexwander/joyctl)
 - 读取 `com.xiaomi.joyose` 的 `teg_config.db` 并写回
 - 推送前备份 `.joyctl.bak`，推送后回读校验
 - 冻结/恢复 Joyose MCC 云控：`persist.sys.sc_allow_conn=0/1`
+- 设备页提供「恢复官方 Joyose（异常时使用）」：清空 Joyose 及相关系统应用数据，重新启用云控接收器并发送开机广播
 
 ## 使用前提
 

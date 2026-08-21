@@ -11,8 +11,8 @@ android {
         applicationId = "com.hexwander.joyctl"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.0.14"
+        versionCode = 16
+        versionName = "1.0.15"
     }
 
     val releaseKeystore = file("release.jks")
