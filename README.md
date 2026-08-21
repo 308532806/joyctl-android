@@ -8,7 +8,7 @@ JoyCtl Android 是基于 [hexwander/joyctl](https://github.com/hexwander/joyctl)
 - 设备页按 PC 版对称布局：拉取/推送、冻结/恢复，刷新状态在底部
 - 设备信息用机型/代号/系统/Root/云控徽章展示
 - 云端拉取优先使用本机 Joyose 版本号；拉不到再按当前机型探测可用配置
-- 规则页模板改成 PC 风格卡片：标题、说明、应用/选择游戏
+- 规则页模板改成 PC 风格卡片：标题、说明、应用/选择游戏；选择游戏会列出本机应用名称和包名
 - 说明文案收到各面板右上角 ⓘ，点击后展开
 - 读取 `com.xiaomi.joyose` 的 `teg_config.db` 并写回
 - 推送前备份 `.joyctl.bak`，推送后回读校验
