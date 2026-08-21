@@ -28,7 +28,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -99,9 +98,10 @@ class MainActivity : Activity() {
     }
     private lateinit var fileText: TextView
     private lateinit var ruleStatsText: TextView
-    private lateinit var featureSummaryText: TextView
+    private lateinit var featureSummaryBox: LinearLayout
     private lateinit var versionStatusText: TextView
-    private lateinit var ruleSpinner: Spinner
+    private lateinit var ruleListBox: LinearLayout
+    private lateinit var ruleListHint: TextView
     private lateinit var editor: EditText
     private lateinit var deviceInput: EditText
     private lateinit var miuiInput: EditText
@@ -122,6 +122,7 @@ class MainActivity : Activity() {
     private val rules = mutableListOf<RuleInfo>()
     private var activeRule: RuleInfo? = null
     private var originalRuleJson = ""
+    private val originalByRuleId = mutableMapOf<Long, String>()
     private var baselineRuleJson = ""
     private var loadingEditor = false
     private var dirty = false
@@ -305,17 +306,15 @@ class MainActivity : Activity() {
         files.addView(fileText)
     }
     private fun buildRulesPage(root: LinearLayout) {
-        val rulesPanel = panel(root, "规则列表")
-        ruleSpinner = Spinner(this)
-        styleSpinner(ruleSpinner)
-        ruleSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position in rules.indices) loadRule(rules[position])
-            }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-        }
-        rulesPanel.addView(ruleSpinner)
+        val rulesPanel = panel(
+            root,
+            "规则列表",
+            "每条规则一张卡片。蓝色边框是当前正在编辑的规则；点卡片即可切换。booster_config 管游戏加速，common_config 管通用配置。",
+        )
+        ruleListHint = text("尚未载入规则。请先到「设备」拉取配置，或到「云端」拉取规则。", 12, 0xff64748b.toInt())
+        rulesPanel.addView(ruleListHint)
+        ruleListBox = LinearLayout(this).also { it.orientation = LinearLayout.VERTICAL }
+        rulesPanel.addView(ruleListBox)
 
         val editorPanel = panel(
             root,
@@ -453,10 +452,11 @@ class MainActivity : Activity() {
         val features = panel(
             root,
             "功能识别",
-            "根据当前规则 JSON 识别帧率锁、温控、后台冻结、监控上报等功能，并对比载入时的基线改动。",
+            "始终对照这条规则载入时的原始内容。橙色「已改」表示当前值已偏离原始规则，灰色「未改」表示这项还没动过。",
         )
-        featureSummaryText = text("载入配置后，将显示当前规则支持的功能和相对载入时的改动。", 13, 0xff111827.toInt())
-        features.addView(featureSummaryText)
+        featureSummaryBox = LinearLayout(this).also { it.orientation = LinearLayout.VERTICAL }
+        features.addView(featureSummaryBox)
+        renderFeatureSummary(null)
     }
 
     private fun buildLogPage(root: LinearLayout) {
@@ -878,10 +878,10 @@ class MainActivity : Activity() {
         val firstContent = loaded.firstOrNull()?.let { JoyoseDb.readRuleContent(currentDbFile, it.ruleId) }
         ui.post {
             rules.clear()
+            originalByRuleId.clear()
             rules.addAll(loaded)
-            val names = loaded.map { "${it.module}  id=${it.ruleId}  v${it.version}  ${(it.contentLength / 1024.0).format1()}KB" }
-            ruleSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, names)
             fileText.text = "当前：$label，${currentDbFile.length()} bytes，${loaded.size} 条规则"
+            renderRuleList()
             if (loaded.isNotEmpty() && firstContent != null) {
                 activeRule = loaded.first()
                 showRule(firstContent)
@@ -892,6 +892,9 @@ class MainActivity : Activity() {
                 editor.setText("")
                 loadingEditor = false
                 dirtyText.text = "未找到规则"
+                originalRuleJson = ""
+                baselineRuleJson = ""
+                renderFeatureSummary(null)
                 updateRuleStats(null)
             }
         }
@@ -909,14 +912,17 @@ class MainActivity : Activity() {
     }
 
     private fun showRule(content: String) {
-        originalRuleJson = content
-        baselineRuleJson = content
+        val ruleId = activeRule?.ruleId
+        val original = if (ruleId != null) originalByRuleId.getOrPut(ruleId) { content } else content
+        originalRuleJson = original
+        baselineRuleJson = original
         loadingEditor = true
         editor.setText(prettyJson(content))
         loadingEditor = false
         dirty = false
         updateDirtyText()
         updateRuleStats(content)
+        renderRuleList()
     }
 
     private fun saveCurrentRuleFromUi(showToast: Boolean): Boolean {
@@ -1256,6 +1262,200 @@ class MainActivity : Activity() {
             .filter { it.isNotEmpty() }
             .distinct()
     }
+    private fun renderRuleList() {
+        if (!::ruleListBox.isInitialized) return
+        ruleListBox.removeAllViews()
+        if (!::ruleListHint.isInitialized) return
+        if (rules.isEmpty()) {
+            ruleListHint.visibility = View.VISIBLE
+            ruleListHint.text = "尚未载入规则。请先到「设备」拉取配置，或到「云端」拉取规则。"
+            return
+        }
+        ruleListHint.visibility = View.GONE
+        if (rules.size > 1) {
+            val nav = row()
+            nav.addView(rowAction("← 上一条") {
+                val i = rules.indexOfFirst { it.ruleId == activeRule?.ruleId }.let { if (it < 0) 0 else it }
+                selectRuleAt(if (i <= 0) rules.lastIndex else i - 1)
+            })
+            nav.addView(rowAction("下一条 →") {
+                val i = rules.indexOfFirst { it.ruleId == activeRule?.ruleId }.let { if (it < 0) 0 else it }
+                selectRuleAt(if (i >= rules.lastIndex) 0 else i + 1)
+            })
+            ruleListBox.addView(nav)
+        }
+        val selectedChanged = activeRule?.ruleId?.let { rid ->
+            val current = if (::editor.isInitialized) editor.text.toString() else ""
+            val original = originalByRuleId[rid] ?: originalRuleJson
+            current.isNotBlank() && JoyoseDb.featureRows(current, original).any { it.changed }
+        } ?: false
+        rules.forEachIndexed { index, rule ->
+            val selected = rule.ruleId == activeRule?.ruleId
+            ruleListBox.addView(ruleListCard(rule, index, selected, selected && selectedChanged))
+        }
+    }
+
+    private fun ruleKindLabel(module: String): String {
+        val m = module.lowercase(Locale.US)
+        return when {
+            m.contains("booster") -> "游戏加速"
+            m.contains("common") -> "通用配置"
+            m.contains("thermal") -> "温控"
+            else -> "其他规则"
+        }
+    }
+
+    private fun selectRuleAt(index: Int) {
+        if (index !in rules.indices) return
+        val rule = rules[index]
+        if (activeRule?.ruleId == rule.ruleId) return
+        if (dirty) {
+            AlertDialog.Builder(this)
+                .setTitle("切换规则")
+                .setMessage("当前规则有未保存修改，切换后这些修改会丢失。")
+                .setPositiveButton("仍要切换") { _, _ -> loadRule(rule) }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+        loadRule(rule)
+    }
+
+    private fun ruleListCard(rule: RuleInfo, index: Int, selected: Boolean, modified: Boolean = false): LinearLayout {
+        val kind = ruleKindLabel(rule.module)
+        val bg = if (selected) 0xffeef5ff.toInt() else 0xfff8fafc.toInt()
+        val stroke = if (selected) 0xff4f8cff.toInt() else 0xffe2e8f0.toInt()
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.setPadding(dp(10), dp(8), dp(10), dp(8))
+        card.background = rounded(bg, 10, stroke)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(6), 0, 0)
+        card.layoutParams = lp
+        card.isClickable = true
+        card.isFocusable = true
+        card.setOnClickListener { selectRuleAt(index) }
+
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        head.gravity = Gravity.CENTER_VERTICAL
+
+        val indexView = text("${index + 1}/${rules.size}", 11, if (selected) 0xff1d4ed8.toInt() else 0xff64748b.toInt())
+        indexView.typeface = Typeface.DEFAULT_BOLD
+        head.addView(indexView)
+
+        val kindView = text(kind, 11, if (selected) Color.WHITE else 0xff1d4ed8.toInt())
+        kindView.typeface = Typeface.DEFAULT_BOLD
+        kindView.setPadding(dp(6), dp(2), dp(6), dp(2))
+        kindView.background = rounded(if (selected) 0xff4f8cff.toInt() else 0xffe8f1ff.toInt(), 999, if (selected) 0xff4f8cff.toInt() else 0xffcfe3ff.toInt())
+        val kindLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        kindLp.setMargins(dp(8), 0, 0, 0)
+        head.addView(kindView, kindLp)
+
+        val stateLabel = when {
+            selected && modified -> "编辑中 · 已改"
+            selected -> "编辑中"
+            else -> "点此切换"
+        }
+        val stateColor = when {
+            selected && modified -> 0xffc2410c.toInt()
+            selected -> 0xff1d4ed8.toInt()
+            else -> 0xff94a3b8.toInt()
+        }
+        val stateView = text(stateLabel, 11, stateColor)
+        val stateLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        stateLp.setMargins(dp(8), 0, 0, 0)
+        head.addView(stateView, stateLp)
+        card.addView(head)
+
+        val titleView = text(rule.module.ifBlank { "未命名模块" }, 14, 0xff0f172a.toInt())
+        titleView.typeface = Typeface.DEFAULT_BOLD
+        val titleLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        titleLp.setMargins(0, dp(4), 0, 0)
+        card.addView(titleView, titleLp)
+
+        val metaView = text("rule_id=${rule.ruleId}  ·  v${rule.version}  ·  ${(rule.contentLength / 1024.0).format1()} KB", 12, 0xff64748b.toInt())
+        val metaLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        metaLp.setMargins(0, dp(2), 0, 0)
+        card.addView(metaView, metaLp)
+        return card
+    }
+
+    private fun renderFeatureSummary(content: String?) {
+        if (!::featureSummaryBox.isInitialized) return
+        featureSummaryBox.removeAllViews()
+        if (content.isNullOrBlank()) {
+            featureSummaryBox.addView(text("未载入规则", 13, 0xff64748b.toInt()))
+            return
+        }
+        val rows = JoyoseDb.featureRows(content, originalRuleJson.takeIf { it.isNotBlank() })
+        if (rows.isEmpty()) {
+            featureSummaryBox.addView(text("当前规则不是合法 JSON，无法识别功能", 13, 0xffb91c1c.toInt()))
+            return
+        }
+        val changedCount = rows.count { it.changed }
+        val summary = text(
+            "对照原始规则：已改 $changedCount 项，未改 ${rows.size - changedCount} 项",
+            12,
+            0xff334155.toInt(),
+        )
+        summary.typeface = Typeface.DEFAULT_BOLD
+        val summaryLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        summaryLp.setMargins(0, 0, 0, dp(4))
+        featureSummaryBox.addView(summary, summaryLp)
+        rows.forEach { row ->
+            featureSummaryBox.addView(featureRowCard(row))
+        }
+    }
+
+    private fun featureRowCard(row: JoyoseDb.FeatureRow): LinearLayout {
+        val changed = row.changed
+        val bg = if (changed) 0xfffff7ed.toInt() else 0xfff8fafc.toInt()
+        val stroke = if (changed) 0xfffdba74.toInt() else 0xffe2e8f0.toInt()
+        val tagFg = if (changed) 0xffc2410c.toInt() else 0xff64748b.toInt()
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.VERTICAL
+        card.setPadding(dp(10), dp(8), dp(10), dp(8))
+        card.background = rounded(bg, 8, stroke)
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(6), 0, 0)
+        card.layoutParams = lp
+
+        val head = LinearLayout(this)
+        head.orientation = LinearLayout.HORIZONTAL
+        head.gravity = Gravity.CENTER_VERTICAL
+        val tag = text(if (changed) "已改" else "未改", 11, if (changed) Color.WHITE else tagFg)
+        tag.typeface = Typeface.DEFAULT_BOLD
+        tag.setPadding(dp(6), dp(2), dp(6), dp(2))
+        tag.background = rounded(if (changed) 0xffea580c.toInt() else 0xffe2e8f0.toInt(), 999, if (changed) 0xffea580c.toInt() else 0xffe2e8f0.toInt())
+        head.addView(tag)
+        val nameView = text(row.name, 13, 0xff0f172a.toInt())
+        nameView.typeface = Typeface.DEFAULT_BOLD
+        val nameLp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        nameLp.setMargins(dp(8), 0, 0, 0)
+        head.addView(nameView, nameLp)
+        card.addView(head)
+
+        val valueView = text(row.value, 12, 0xff334155.toInt())
+        val valueLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        valueLp.setMargins(0, dp(4), 0, 0)
+        card.addView(valueView, valueLp)
+        val originalValue = row.original
+        if (changed && !originalValue.isNullOrBlank() && originalValue != row.value) {
+            val fromView = text("原始：$originalValue", 11, 0xff9a3412.toInt())
+            val fromLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            fromLp.setMargins(0, dp(2), 0, 0)
+            card.addView(fromView, fromLp)
+        }
+        row.extra.forEach { line ->
+            val extraView = text("· $line", 11, 0xff9a3412.toInt())
+            val extraLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            extraLp.setMargins(0, dp(2), 0, 0)
+            card.addView(extraView, extraLp)
+        }
+        return card
+    }
+
     private fun reloadCurrentRule() {
         val rule = activeRule ?: run {
             toast("请先载入规则")
@@ -1275,6 +1475,7 @@ class MainActivity : Activity() {
         val rule = activeRule
         if (rule == null || content.isNullOrBlank()) {
             ruleStatsText.text = "未载入规则"
+            renderFeatureSummary(null)
             return
         }
         val stats = runCatching {
@@ -1290,13 +1491,8 @@ class MainActivity : Activity() {
             "当前规则不是可统计的 JSON\n规则模块：${rule.module}\nrule_id：${rule.ruleId} · v${rule.version}"
         }
         ruleStatsText.text = stats
-        if (::featureSummaryText.isInitialized) {
-            featureSummaryText.text = if (content.isNullOrBlank()) {
-                "未载入规则"
-            } else {
-                JoyoseDb.featureSummary(content, baselineRuleJson.takeIf { it.isNotBlank() })
-            }
-        }
+        renderFeatureSummary(content)
+        renderRuleList()
     }
 
     private fun updateVersionStatus(report: String) {
@@ -1969,29 +2165,60 @@ object JoyoseDb {
         }.getOrDefault("无法解析")
     }
 
-    fun featureSummary(content: String, baseline: String?): String {
-        val root = runCatching { JSONObject(normalizeJson(content)) }.getOrElse {
-            return "当前规则不是合法 JSON，无法识别功能"
-        }
+    data class FeatureRow(
+        val key: String,
+        val name: String,
+        val value: String,
+        val changed: Boolean,
+        val original: String? = null,
+        val extra: List<String> = emptyList(),
+    )
+
+    fun featureRows(content: String, baseline: String?): List<FeatureRow> {
+        val root = runCatching { JSONObject(normalizeJson(content)) }.getOrElse { return emptyList() }
         val currentFeatures = detectFeatures(root)
         val baseRoot = baseline?.let { runCatching { JSONObject(normalizeJson(it)) }.getOrNull() }
         val baseFeatures = baseRoot?.let { detectFeatures(it) }.orEmpty()
-        val changed = changedFeatureNames(baseFeatures, currentFeatures)
+        val oldByKey = baseFeatures.associateBy { it.key }
         val pkgDiff = packageDiff(baseRoot, root)
-        return buildString {
-            append("当前配置识别到的功能\n")
-            currentFeatures.forEach { feature ->
-                append("• ${feature.name}: ${feature.value}\n")
+        val fpsExtra = pkgDiff.filter { it.startsWith("帧率锁") }
+        val migtExtra = pkgDiff.filter { it.startsWith("migt") }
+        return currentFeatures.map { now ->
+            val before = oldByKey[now.key]
+            val extra = when (now.key) {
+                "novatek" -> fpsExtra
+                "migt" -> migtExtra
+                else -> emptyList()
             }
-            append("\n相对载入时的改动\n")
-            val allChanges = changed + pkgDiff
-            if (allChanges.isEmpty()) {
-                append("• 暂未检测到可识别功能的变化")
-            } else {
-                allChanges.forEach { append("• $it\n") }
+            val changed = (before != null && before.value != now.value) || extra.isNotEmpty()
+            FeatureRow(
+                key = now.key,
+                name = now.name,
+                value = now.value,
+                changed = changed,
+                original = if (changed) before?.value else null,
+                extra = extra,
+            )
+        }
+    }
+
+    fun featureSummary(content: String, baseline: String?): String {
+        val rows = featureRows(content, baseline)
+        if (rows.isEmpty()) return "当前规则不是合法 JSON，无法识别功能"
+        val changedCount = rows.count { it.changed }
+        return buildString {
+            append("对照载入时的原始规则：已改 $changedCount 项，未改 ${rows.size - changedCount} 项\n")
+            rows.forEach { row ->
+                if (row.changed) {
+                    append("▲ ${row.name}：${row.original ?: "原值未知"} → ${row.value}\n")
+                    row.extra.forEach { append("    · $it\n") }
+                } else {
+                    append("○ ${row.name}：${row.value}\n")
+                }
             }
         }.trim()
     }
+
 
     private data class FeatureValue(val key: String, val name: String, val value: String)
 
