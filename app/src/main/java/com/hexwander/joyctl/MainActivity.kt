@@ -1303,7 +1303,7 @@ class MainActivity : Activity() {
 object Shell {
     data class Result(val code: Int, val stdout: String, val stderr: String)
 
-
+    @Volatile private var rootedCache: Boolean? = null
     fun isRooted(): Boolean {
         rootedCache?.let { return it }
         val ok = runCatching { root("id", timeoutSeconds = 3).contains("uid=0") }.getOrDefault(false)
