@@ -124,6 +124,7 @@ class MainActivity : Activity() {
     private var originalRuleJson = ""
     private val originalByRuleId = mutableMapOf<Long, String>()
     private val baselineByRuleId = mutableMapOf<Long, String>()
+    private val baselineByModule = mutableMapOf<String, String>()
     private var baselineFile: File? = null
     private var baselineLabel = "未设置对照"
     private var baselineRuleJson = ""
@@ -621,6 +622,7 @@ class MainActivity : Activity() {
             copyDeviceDbTo(currentDbFile, dbPath)
             backupCurrentDb("device-pull")
             loadDbFromFile("设备配置")
+            refreshCloudBaselineForCurrentDb("设备配置")
             updateVersionStatus(JoyoseDb.versionReport(currentDbFile))
             appendLog("已从 $dbPath 拉取 ${currentDbFile.length()} bytes")
         }
@@ -804,6 +806,7 @@ class MainActivity : Activity() {
                 JoyoseDb.validate(currentDbFile)
                 backupCurrentDb("import")
                 loadDbFromFile("导入文件")
+                refreshCloudBaselineForCurrentDb("导入文件")
                 updateVersionStatus(JoyoseDb.versionReport(currentDbFile))
                 return@runTask
             }
@@ -821,10 +824,12 @@ class MainActivity : Activity() {
                 }
                 updateVersionStatus("JSON 已载入编辑器，version=${JoyoseDb.extractJsonVersion(normalized)}。\n点击“保存修改”后写入当前 DB，再推送到设备。")
                 appendLog("已载入 JSON 规则 version=${JoyoseDb.extractJsonVersion(normalized)}")
+                refreshCloudBaselineForCurrentDb("导入 JSON 到当前规则")
             } else {
                 JoyoseDb.buildFromJsonRule(currentDbFile, normalized)
                 backupCurrentDb("json-import")
                 loadDbFromFile("JSON 规则文件")
+                refreshCloudBaselineForCurrentDb("JSON 规则文件")
                 updateVersionStatus(JoyoseDb.versionReport(currentDbFile))
             }
         }
@@ -884,9 +889,11 @@ class MainActivity : Activity() {
 
     private fun loadBaselineMap(file: File, label: String) {
         baselineByRuleId.clear()
+        baselineByModule.clear()
         runCatching {
             JoyoseDb.readAllRuleContents(file).forEach { (rule, content) ->
                 baselineByRuleId[rule.ruleId] = content
+                if (rule.module.isNotBlank()) baselineByModule[rule.module] = content
             }
             baselineFile = file
             baselineLabel = label
@@ -896,35 +903,88 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun latestBackup(prefix: String): File? {
-        return filesDir.listFiles()
-            ?.filter { it.isFile && it.name.startsWith("teg_config_${prefix}_") && it.name.endsWith(".db") }
-            ?.maxByOrNull { it.lastModified() }
+    private fun applyCloudBaseline(rules: List<CloudRule>, appVersion: String) {
+        val dest = File(filesDir, "teg_config_baseline.db")
+        JoyoseDb.buildFromCloudRules(dest, rules)
+        loadBaselineMap(dest, "云端未修改配置 appVersion=$appVersion")
+        ui.post {
+            if (::editor.isInitialized) updateRuleStats(editor.text.toString())
+            renderRuleList()
+        }
+    }
+
+    private fun cloudFetchParams(): Triple<String, String, String> {
+        val region = regionSpinner.selectedItem?.toString() ?: "CN"
+        val device = deviceInput.text.toString().trim().ifBlank { Build.DEVICE ?: "myron" }
+        val miuiVersion = miuiInput.text.toString().trim().ifBlank { "V816" }
+        return Triple(region, device, miuiVersion)
+    }
+
+    private fun preferredJoyoseVersions(): List<String> {
+        val versions = linkedSetOf<String>()
+        val typed = if (::appVersionInput.isInitialized) appVersionInput.text.toString().trim() else ""
+        if (typed.isNotBlank()) versions += typed
+        detectInstalledJoyose()?.first?.let { versions += it }
+        versions.addAll(listOf("514", "508", "500", "490", "477", "460", "450"))
+        return versions.toList()
+    }
+
+    private fun fetchCloudRulesForBaseline(): Pair<CloudFetchResult, String> {
+        val (region, device, miuiVersion) = cloudFetchParams()
+        val localVersion = if (::localVersionInput.isInitialized) {
+            localVersionInput.text.toString().trim().ifBlank { "0" }
+        } else "0"
+        val identity = readDeviceIdentityOrNull()
+        var lastError: String? = null
+        for (ver in preferredJoyoseVersions()) {
+            appendLog("对照云端：尝试 Joyose appVersion=$ver")
+            try {
+                val fetched = MccClient.fetch(
+                    CloudParams(region, device, miuiVersion, ver, localVersion, identity, versionNameFor(ver)),
+                )
+                if (fetched.applyRules.isNotEmpty()) {
+                    ui.post { if (::appVersionInput.isInitialized) appVersionInput.setText(ver) }
+                    return fetched to ver
+                }
+                lastError = "appVersion=$ver 没有可应用规则"
+                appendLog(lastError!!)
+            } catch (e: Exception) {
+                lastError = "appVersion=$ver 失败：${e.message}"
+                appendLog(lastError!!)
+            }
+        }
+        appendLog("对照云端：本机版本未拉到可用规则，开始按机型 $device 探测")
+        return probeLatestCloudConfig(region, device, miuiVersion, localVersion, identity)
+    }
+
+    private fun refreshCloudBaselineForCurrentDb(source: String) {
+        try {
+            val (fetched, ver) = fetchCloudRulesForBaseline()
+            applyCloudBaseline(fetched.applyRules, ver)
+            appendLog(
+                "ok",
+                "已用云端未修改配置做对照",
+                "来源：$source，appVersion=$ver，规则 ${fetched.applyRules.size} 条，maxVersion=${fetched.maxVersion}",
+            )
+        } catch (e: Exception) {
+            appendLog("warn", "云端对照拉取失败，暂时对照当前载入内容", e.message ?: "")
+            if (baselineByRuleId.isEmpty() && currentDbFile.exists()) {
+                snapshotBaselineFromCurrentDb("载入时的原始配置（云端对照失败）")
+            }
+        }
     }
 
     private fun captureBaselineFromCurrentDb(label: String) {
         when {
             label.startsWith("云端规则") -> {
                 val existing = baselineFile
-                if (existing != null && existing.exists() && baselineLabel == "云端未修改配置" && baselineByRuleId.isNotEmpty()) {
+                if (existing != null && existing.exists() && baselineLabel.startsWith("云端未修改配置") && baselineByRuleId.isNotEmpty()) {
                     return
                 }
                 snapshotBaselineFromCurrentDb("云端未修改配置")
             }
-            label == "设备配置" -> {
-                val bak = latestBackup("device-pull")
-                if (bak != null) loadBaselineMap(bak, "设备原始备份")
-                else snapshotBaselineFromCurrentDb("设备原始备份")
-            }
-            label == "导入文件" -> {
-                val bak = latestBackup("import")
-                if (bak != null) loadBaselineMap(bak, "导入文件原始备份")
-                else snapshotBaselineFromCurrentDb("导入文件原始备份")
-            }
-            label == "JSON 规则文件" -> {
-                val bak = latestBackup("json-import")
-                if (bak != null) loadBaselineMap(bak, "导入 JSON 原始备份")
-                else snapshotBaselineFromCurrentDb("导入 JSON 原始备份")
+            label == "设备配置" || label == "导入文件" || label == "JSON 规则文件" -> {
+                if (baselineByRuleId.isEmpty()) snapshotBaselineFromCurrentDb("载入时的原始配置")
             }
             else -> snapshotBaselineFromCurrentDb("载入时的原始配置")
         }
@@ -971,11 +1031,28 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun resolveBaselineContent(rule: RuleInfo?, fallback: String): String {
+        if (rule != null) {
+            baselineByRuleId[rule.ruleId]?.let { return it }
+            if (rule.module.isNotBlank()) baselineByModule[rule.module]?.let { return it }
+            val moduleKind = when {
+                rule.module.contains("booster", ignoreCase = true) -> "booster"
+                rule.module.contains("common", ignoreCase = true) -> "common"
+                rule.module.contains("thermal", ignoreCase = true) -> "thermal"
+                else -> ""
+            }
+            if (moduleKind.isNotBlank()) {
+                baselineByModule.entries.firstOrNull { it.key.contains(moduleKind, ignoreCase = true) }?.value?.let { return it }
+            }
+        }
+        return fallback
+    }
+
     private fun showRule(content: String) {
         val ruleId = activeRule?.ruleId
         val original = if (ruleId != null) originalByRuleId.getOrPut(ruleId) { content } else content
         originalRuleJson = original
-        baselineRuleJson = if (ruleId != null) baselineByRuleId[ruleId] ?: original else original
+        baselineRuleJson = resolveBaselineContent(activeRule, original)
         loadingEditor = true
         editor.setText(prettyJson(content))
         loadingEditor = false
@@ -1333,7 +1410,7 @@ class MainActivity : Activity() {
         }
         val selectedChanged = activeRule?.ruleId?.let { rid ->
             val current = if (::editor.isInitialized) editor.text.toString() else ""
-            val original = baselineByRuleId[rid] ?: baselineRuleJson
+            val original = resolveBaselineContent(activeRule, baselineRuleJson)
             current.isNotBlank() && JoyoseDb.featureRows(current, original).any { it.changed }
         } ?: false
         rules.forEachIndexed { index, rule ->
@@ -1435,7 +1512,7 @@ class MainActivity : Activity() {
             featureSummaryBox.addView(text("未载入规则", 13, 0xff64748b.toInt()))
             return
         }
-        val baseline = activeRule?.ruleId?.let { baselineByRuleId[it] } ?: baselineRuleJson
+        val baseline = resolveBaselineContent(activeRule, baselineRuleJson)
         val rows = JoyoseDb.featureRows(content, baseline.takeIf { it.isNotBlank() })
         if (rows.isEmpty()) {
             featureSummaryBox.addView(text("当前规则不是合法 JSON，无法识别功能", 13, 0xffb91c1c.toInt()))
