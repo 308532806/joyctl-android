@@ -250,6 +250,7 @@ class MainActivity : Activity() {
             "复刻 Joyose MCC getData 协议。会先用本机 Joyose 版本号拉取；若没有可应用规则，再按当前机型探测能搜到的最新云端配置。",
         )
         regionSpinner = Spinner(this)
+        styleSpinner(regionSpinner)
         regionSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, arrayOf("CN", "INTL", "INDIA", "RUSSIA"))
         cloud.addView(label("服务器区域"))
         cloud.addView(regionSpinner)
@@ -292,6 +293,7 @@ class MainActivity : Activity() {
     private fun buildRulesPage(root: LinearLayout) {
         val rulesPanel = panel(root, "规则列表")
         ruleSpinner = Spinner(this)
+        styleSpinner(ruleSpinner)
         ruleSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (position in rules.indices) loadRule(rules[position])
@@ -344,15 +346,15 @@ class MainActivity : Activity() {
         val templates = panel(
             root,
             "一键策略模板",
-            "模板只改当前载入的规则 JSON。需要指定游戏的模板会列出本机应用（名称+包名）供选择；也可应用到全部游戏。改完后仍需保存并推送到设备。",
+            "模板只改当前载入的规则 JSON。点「选择游戏」可多选本机应用，选完后点「修改」才会写入规则。「全部游戏」只改 Joyose 配置里已有的游戏条目，不会给本机其它 App 新增配置。改完后仍需保存并推送到设备。",
         )
-        packageInput = input("目标游戏包名；留空表示全部", "")
-        templates.addView(label("选择目标游戏（包名）"))
+        packageInput = input("多个包名用逗号分隔；留空 = Joyose 配置里的全部游戏", "")
+        templates.addView(label("选择目标游戏（仅作用于 Joyose 配置里已有的游戏条目）"))
         templates.addView(packageInput)
         templates.addView(
             templateCard(
                 "解锁指定游戏的帧率锁",
-                "移除指定游戏的 90fps 帧率锁（留空 = 全部游戏）",
+                "从 Joyose 帧率锁名单中移除所选游戏；「全部游戏」会清空该名单，不会给其它 App 加条目",
                 "🎯 选择游戏",
             ) { pickGameThenApply(TemplateId.UNLOCK_FPS) },
         )
@@ -366,7 +368,7 @@ class MainActivity : Activity() {
         templates.addView(
             templateCard(
                 "提升指定游戏 CPU 大核基线",
-                "指定游戏大核基线提升到 1400MHz（留空 = 全部）",
+                "只提升 Joyose migt 名单里已有的所选游戏；「全部游戏」改该名单中的全部条目",
                 "🎯 选择游戏",
             ) { pickGameThenApply(TemplateId.RAISE_MIGT) },
         )
@@ -928,13 +930,28 @@ class MainActivity : Activity() {
         box.setPadding(dp(16), dp(4), dp(16), dp(4))
 
         val hint = text(
-            "已读取 ${apps.size} 个应用（名称 + 包名）。可搜索后点选，或直接应用到全部游戏。",
+            "已读取 ${apps.size} 个本机应用，可搜索后多选。点选不会立刻改规则，需再点「修改」。\n「全部游戏」只作用于 Joyose 配置里已有的游戏条目，不会给本机其它 App 新增配置。",
             12,
             0xff6b7280.toInt(),
         )
         box.addView(hint)
 
-        val search = input("搜索应用名或包名", packageInput.text.toString())
+        val selected = linkedSetOf<String>()
+        selected.addAll(parsePackageList(packageInput.text.toString()))
+        val selectedText = text("", 12, 0xff1d4ed8.toInt())
+        val selectedLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        selectedLp.setMargins(0, dp(8), 0, 0)
+        box.addView(selectedText, selectedLp)
+        fun refreshSelectedLabel() {
+            selectedText.text = if (selected.isEmpty()) {
+                "未选择应用"
+            } else {
+                "已选 ${selected.size} 个：${selected.joinToString(", ")}"
+            }
+        }
+        refreshSelectedLabel()
+
+        val search = input("搜索应用名或包名", "")
         search.minHeight = dp(44)
         search.background = rounded(0xfff8fbff.toInt(), 8, 0xffdbe7f5.toInt())
         val searchLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -945,23 +962,38 @@ class MainActivity : Activity() {
         val adapter = object : ArrayAdapter<InstalledApp>(this, android.R.layout.simple_list_item_2, android.R.id.text1, visible) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val row = (convertView as? LinearLayout) ?: LinearLayout(context).also {
-                    it.orientation = LinearLayout.VERTICAL
-                    it.setPadding(dp(4), dp(10), dp(4), dp(10))
+                    it.orientation = LinearLayout.HORIZONTAL
+                    it.gravity = Gravity.CENTER_VERTICAL
+                    it.setPadding(dp(4), dp(8), dp(4), dp(8))
                     it.addView(TextView(context).apply {
+                        this.id = android.R.id.icon
+                        setTextSize(16f)
+                        minWidth = dp(24)
+                    })
+                    val col = LinearLayout(context)
+                    col.orientation = LinearLayout.VERTICAL
+                    col.addView(TextView(context).apply {
                         this.id = android.R.id.text1
                         setTextSize(15f)
                         setTextColor(0xff111827.toInt())
                         typeface = Typeface.DEFAULT_BOLD
                     })
-                    it.addView(TextView(context).apply {
+                    col.addView(TextView(context).apply {
                         this.id = android.R.id.text2
                         setTextSize(11f)
                         setTextColor(0xff6b7280.toInt())
                     })
+                    it.addView(col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 }
                 val item = getItem(position) ?: return row
+                val on = selected.contains(item.packageName)
+                row.findViewById<TextView>(android.R.id.icon).apply {
+                    text = if (on) "✓" else "○"
+                    setTextColor(if (on) 0xff1d4ed8.toInt() else 0xff9ca3af.toInt())
+                }
                 row.findViewById<TextView>(android.R.id.text1).text = item.label
                 row.findViewById<TextView>(android.R.id.text2).text = item.packageName
+                row.setBackgroundColor(if (on) 0xffeef5ff.toInt() else Color.TRANSPARENT)
                 return row
             }
         }
@@ -1002,12 +1034,31 @@ class MainActivity : Activity() {
                 applyTemplate(templateId, pkg = "")
             }
             .setNegativeButton("取消", null)
+            .setPositiveButton("修改", null)
             .create()
-        list.setOnItemClickListener { _, _, position, _ ->
-            val item = adapter.getItem(position) ?: return@setOnItemClickListener
-            packageInput.setText(item.packageName)
-            dialog.dismiss()
-            applyTemplate(templateId, pkg = item.packageName)
+        dialog.setOnShowListener {
+            val modify = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            fun syncModify() {
+                modify.visibility = if (selected.isEmpty()) View.GONE else View.VISIBLE
+            }
+            syncModify()
+            modify.setOnClickListener {
+                if (selected.isEmpty()) {
+                    toast("请先点选至少一个应用")
+                    return@setOnClickListener
+                }
+                val pkgs = selected.joinToString(",")
+                packageInput.setText(pkgs)
+                dialog.dismiss()
+                applyTemplate(templateId, pkg = pkgs)
+            }
+            list.setOnItemClickListener { _, _, position, _ ->
+                val item = adapter.getItem(position) ?: return@setOnItemClickListener
+                if (!selected.add(item.packageName)) selected.remove(item.packageName)
+                adapter.notifyDataSetChanged()
+                refreshSelectedLabel()
+                syncModify()
+            }
         }
         dialog.show()
     }
@@ -1088,20 +1139,49 @@ class MainActivity : Activity() {
             toast("请先载入规则")
             return
         }
+        val pkgs = parsePackageList(pkg)
         try {
-            val result = Templates.apply(templateId, editor.text.toString(), originalRuleJson, pkg)
+            var json = editor.text.toString()
+            val messages = mutableListOf<String>()
+            val errors = mutableListOf<String>()
+            if (pkgs.isEmpty()) {
+                val result = Templates.apply(templateId, json, originalRuleJson, "")
+                json = result.json
+                messages.add(result.message)
+            } else {
+                for (one in pkgs) {
+                    try {
+                        val result = Templates.apply(templateId, json, originalRuleJson, one)
+                        json = result.json
+                        messages.add(result.message)
+                    } catch (e: Exception) {
+                        errors.add("$one：${e.message}")
+                    }
+                }
+            }
+            if (messages.isEmpty()) {
+                toast(errors.joinToString("；").ifBlank { "模板失败" })
+                return
+            }
             loadingEditor = true
-            editor.setText(prettyJson(result.json))
+            editor.setText(prettyJson(json))
             loadingEditor = false
             dirty = true
             updateDirtyText()
-            updateRuleStats(result.json)
-            toast(result.message)
+            updateRuleStats(json)
+            val extra = if (errors.isEmpty()) "" else "；未改动：${errors.joinToString("；")}"
+            toast(messages.joinToString("；") + extra)
         } catch (e: Exception) {
             toast("模板失败：${e.message}")
         }
     }
 
+    private fun parsePackageList(raw: String): List<String> {
+        return raw.split(',', ';', '\n', '\t', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
     private fun reloadCurrentRule() {
         val rule = activeRule ?: run {
             toast("请先载入规则")
@@ -1443,8 +1523,23 @@ class MainActivity : Activity() {
         e.setText(initial)
         e.setSingleLine(true)
         e.setTextSize(14f)
-        e.setPadding(dp(10), 0, dp(10), 0)
+        e.includeFontPadding = false
+        e.setPadding(dp(12), dp(14), dp(12), dp(14))
+        e.minHeight = dp(48)
+        e.background = rounded(0xfff8fbff.toInt(), 8, 0xffdbe7f5.toInt())
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(8), 0, 0)
+        e.layoutParams = lp
         return e
+    }
+
+    private fun styleSpinner(spinner: Spinner) {
+        spinner.setPadding(dp(8), dp(10), dp(8), dp(10))
+        spinner.minimumHeight = dp(48)
+        spinner.background = rounded(0xfff8fbff.toInt(), 8, 0xffdbe7f5.toInt())
+        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.setMargins(0, dp(8), 0, 0)
+        spinner.layoutParams = lp
     }
 
     private fun label(s: String): TextView = text(s, 12, 0xff526071.toInt()).also {
