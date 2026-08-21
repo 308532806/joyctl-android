@@ -108,6 +108,7 @@ class MainActivity : Activity() {
     private lateinit var appVersionInput: EditText
     private lateinit var localVersionInput: EditText
     private lateinit var packageInput: EditText
+    private lateinit var pidTempInput: EditText
     private lateinit var regionSpinner: Spinner
 
     private lateinit var pages: Array<View>
@@ -380,12 +381,19 @@ class MainActivity : Activity() {
                 "🎯 选择游戏",
             ) { pickGameThenApply(TemplateId.UNLOCK_FPS) },
         )
+        pidTempInput = input("例如 47", "47")
+        pidTempInput.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+        val pidTempBox = LinearLayout(this)
+        pidTempBox.orientation = LinearLayout.VERTICAL
+        pidTempBox.addView(label("策略组温控阈值（°C）"))
+        pidTempBox.addView(pidTempInput)
         templates.addView(
             templateCard(
                 "放宽所有游戏的温控",
-                "所有策略组温控阈值统一提高到 47°C（发热上升）",
-                "应用",
-            ) { applyTemplate(TemplateId.RELAX_PID) },
+                "多选游戏后，把对应策略组的 PID 温控阈值改成你填的温度。App 会转成 Joyose 可识别的 start:end 格式，例如 47 → 47:48，并保留原帧率/PID 参数。点「全部游戏」只改配置里已有 PID 的策略组。",
+                "🎯 选择游戏",
+                extra = pidTempBox,
+            ) { pickGameThenApply(TemplateId.RELAX_PID) },
         )
         templates.addView(
             templateCard(
@@ -1151,6 +1159,14 @@ class MainActivity : Activity() {
             toast("请先载入规则")
             return
         }
+        if (templateId == TemplateId.RELAX_PID) {
+            try {
+                readPidTempCelsius()
+            } catch (e: Exception) {
+                toast(e.message ?: "请先填写有效温控阈值")
+                return
+            }
+        }
         toast("正在读取本机应用列表…")
         worker.execute {
             try {
@@ -1161,6 +1177,7 @@ class MainActivity : Activity() {
             }
         }
     }
+
 
     private fun showGamePicker(templateId: TemplateId, apps: List<InstalledApp>) {
         val box = LinearLayout(this)
@@ -1379,35 +1396,48 @@ class MainActivity : Activity() {
             return
         }
         val pkgs = parsePackageList(pkg)
+        val extra = if (templateId == TemplateId.RELAX_PID) {
+            try {
+                readPidTempCelsius().toString()
+            } catch (e: Exception) {
+                toast(e.message ?: "请填写有效温控阈值")
+                appendLog("warn", "模板未执行", e.message ?: "请填写有效温控阈值")
+                return
+            }
+        } else {
+            ""
+        }
         val name = templateName(templateId)
         val target = if (pkgs.isEmpty()) "Joyose 配置里已有的全部游戏条目" else pkgs.joinToString(", ")
-        appendLog("info", "开始应用模板：$name", "目标：$target")
+        val extraHint = if (templateId == TemplateId.RELAX_PID) "\n阈值：${formatJoyoseTemp(extra.toDouble())}°C" else ""
+        appendLog("info", "开始应用模板：$name", "目标：$target$extraHint")
         try {
             var json = editor.text.toString()
             val messages = mutableListOf<String>()
             val errors = mutableListOf<String>()
-            if (pkgs.isEmpty()) {
-                try {
-                    val result = Templates.apply(templateId, json, originalRuleJson, "")
+            try {
+                val pkgArg = if (templateId == TemplateId.RELAX_PID) pkgs.joinToString(",") else pkgs.firstOrNull().orEmpty()
+                if (templateId == TemplateId.RELAX_PID || pkgs.isEmpty() || pkgs.size == 1) {
+                    val result = Templates.apply(templateId, json, originalRuleJson, pkgArg, extra)
                     json = result.json
                     messages.add(result.message)
                     appendLog("ok", "$name 成功", result.message)
-                } catch (e: Exception) {
-                    errors.add(e.message ?: e.javaClass.simpleName)
-                    appendLog("error", "$name 失败", e.message ?: e.javaClass.simpleName)
-                }
-            } else {
-                for (one in pkgs) {
-                    try {
-                        val result = Templates.apply(templateId, json, originalRuleJson, one)
-                        json = result.json
-                        messages.add(result.message)
-                        appendLog("ok", "$name · $one", result.message)
-                    } catch (e: Exception) {
-                        errors.add("$one：${e.message}")
-                        appendLog("error", "$name · $one 失败", e.message ?: e.javaClass.simpleName)
+                } else {
+                    for (one in pkgs) {
+                        try {
+                            val result = Templates.apply(templateId, json, originalRuleJson, one, extra)
+                            json = result.json
+                            messages.add(result.message)
+                            appendLog("ok", "$name · $one", result.message)
+                        } catch (e: Exception) {
+                            errors.add("$one：${e.message}")
+                            appendLog("error", "$name · $one 失败", e.message ?: e.javaClass.simpleName)
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                errors.add(e.message ?: e.javaClass.simpleName)
+                appendLog("error", "$name 失败", e.message ?: e.javaClass.simpleName)
             }
             if (messages.isEmpty()) {
                 val fail = errors.joinToString("；").ifBlank { "模板失败" }
@@ -1421,8 +1451,8 @@ class MainActivity : Activity() {
             dirty = true
             updateDirtyText()
             updateRuleStats(json)
-            val extra = if (errors.isEmpty()) "" else "；未改动：${errors.joinToString("；")}"
-            toast(messages.joinToString("；") + extra)
+            val extraMsg = if (errors.isEmpty()) "" else "；未改动：${errors.joinToString("；")}"
+            toast(messages.joinToString("；") + extraMsg)
             appendLog(
                 if (errors.isEmpty()) "ok" else "warn",
                 "$name 已写入编辑器（尚未保存/推送）",
@@ -1436,6 +1466,7 @@ class MainActivity : Activity() {
         }
     }
 
+
     private fun templateName(templateId: TemplateId): String = when (templateId) {
         TemplateId.UNLOCK_FPS -> "解锁帧率锁"
         TemplateId.RELAX_PID -> "放宽温控"
@@ -1448,6 +1479,16 @@ class MainActivity : Activity() {
         TemplateId.DISABLE_L3_LOG -> "禁用 L3 卡顿日志"
         TemplateId.ENABLE_QSYNC -> "开启 QSync"
         TemplateId.RESET -> "恢复原始配置"
+    }
+    private fun readPidTempCelsius(): Double {
+        if (!::pidTempInput.isInitialized) return 47.0
+        val raw = pidTempInput.text.toString().trim()
+            .replace("℃", "")
+            .replace("°C", "")
+            .replace("°", "")
+        val value = raw.toDoubleOrNull() ?: throw IOException("请填写有效的温控阈值，例如 47")
+        if (value < 20.0 || value > 80.0) throw IOException("温控阈值需在 20–80°C 之间")
+        return value
     }
     private fun parsePackageList(raw: String): List<String> {
         return raw.split(',', ';', '\n', '\t', ' ')
@@ -1997,7 +2038,13 @@ class MainActivity : Activity() {
         return box
     }
 
-    private fun templateCard(name: String, desc: String, button: String, onClick: () -> Unit): LinearLayout {
+    private fun templateCard(
+        name: String,
+        desc: String,
+        button: String,
+        extra: View? = null,
+        onClick: () -> Unit,
+    ): LinearLayout {
         val card = LinearLayout(this)
         card.orientation = LinearLayout.VERTICAL
         card.clipChildren = false
@@ -2012,6 +2059,12 @@ class MainActivity : Activity() {
         val descLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         descLp.setMargins(0, dp(2), 0, dp(6))
         card.addView(descView, descLp)
+        if (extra != null) {
+            val extraLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            extraLp.setMargins(0, 0, 0, dp(6))
+            extra.layoutParams = extraLp
+            card.addView(extra)
+        }
         card.addView(action(button, kind = "primary", onClick = onClick).also {
             (it.layoutParams as LinearLayout.LayoutParams).setMargins(0, 0, 0, 0)
         })
@@ -2455,17 +2508,19 @@ object JoyoseDb {
     }
 
     private fun pidSummary(gb: JSONObject): String {
-        val starts = Regex("""(\d+(?:\.\d+)?):(\d+(?:\.\d+)?) (12[0-9]|9[0-9]|6[0-9]|4[0-9]|3[0-9]) """)
+        val starts = Regex("""(\d+(?:\.\d+)?):(\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)""")
             .findAll(gb.toString())
             .mapNotNull { it.groupValues[1].toDoubleOrNull() }
             .filter { it > 10.0 }
             .toList()
         if (starts.isEmpty()) return "未配置"
-        val relaxed = starts.count { it >= 46.5 }
-        val tight = starts.size - relaxed
-        val min = starts.minOrNull() ?: return "未配置"
-        val max = starts.maxOrNull() ?: min
-        return "阈值 ${strip0(min)}-${strip0(max)}°C · 已放宽 $relaxed · 未放宽 $tight"
+        val counts = starts.groupingBy { formatJoyoseTemp(it) }.eachCount().toSortedMap(compareBy { it.toDouble() })
+        return if (counts.size == 1) {
+            "统一 ${counts.keys.first()}°C · ${starts.size} 处"
+        } else {
+            val summary = counts.entries.joinToString("，") { "${it.key}°C×${it.value}" }
+            "$summary · 共 ${starts.size} 处"
+        }
     }
 
     private fun migtSummary(gb: JSONObject): String {
@@ -2713,10 +2768,10 @@ enum class TemplateId {
 data class TemplateResult(val message: String, val json: String)
 
 object Templates {
-    fun apply(id: TemplateId, current: String, original: String, pkg: String): TemplateResult {
+    fun apply(id: TemplateId, current: String, original: String, pkg: String, extra: String = ""): TemplateResult {
         return when (id) {
             TemplateId.UNLOCK_FPS -> unlockFps(current, pkg)
-            TemplateId.RELAX_PID -> relaxPid(current)
+            TemplateId.RELAX_PID -> relaxPid(current, pkg, extra.toDoubleOrNull() ?: 47.0)
             TemplateId.RAISE_MIGT -> raiseMigt(current, pkg)
             TemplateId.RAISE_MIGT_ALL -> raiseMigt(current, "")
             TemplateId.CLEAR_THERMAL -> clearThermal(current)
@@ -2752,21 +2807,108 @@ object Templates {
         return TemplateResult("已移除 $pkg 的帧率锁", root.toString())
     }
 
-    private fun relaxPid(current: String): TemplateResult {
-        val raw = normalizeJson(current)
-        val pattern = Regex("""(\d+(?:\.\d+)?):(\d+(?:\.\d+)?) (12[0-9]|9[0-9]|6[0-9]|4[0-9]|3[0-9]) (\d+) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)(?: (\d+(?:\.\d+)?))?""")
+    private fun relaxPid(current: String, pkg: String, celsius: Double): TemplateResult {
+        val root = JSONObject(normalizeJson(current))
+        val gb = booster(root)
+        val overrides = gb.optJSONObject("booster_config")?.optJSONArray("ovrride_config")
+            ?: throw IOException("未找到 booster_config.ovrride_config")
+        val groupPkgs = pidGroupPackages(gb)
+        val targets = pkg.split(',', ';', '\n', '\t', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        val start = formatJoyoseTemp(celsius)
+        val end = formatJoyoseTemp(celsius + 1.0)
+        var groups = 0
+        var fields = 0
+        var already = 0
+        val hitNames = mutableListOf<String>()
+        for (i in 0 until overrides.length()) {
+            val item = overrides.optJSONObject(i) ?: continue
+            val gameName = item.optString("game_name")
+            if (targets.isNotEmpty() && !pidOverrideMatches(gameName, targets, groupPkgs)) continue
+            val keys = listOf("PID_T", "PID_M", "PID_RE4_T", "PID_RE4_M").filter { item.has(it) }
+            if (keys.isEmpty()) continue
+            var changedThis = false
+            var alreadyThis = false
+            for (key in keys) {
+                val old = item.optString(key)
+                val rewritten = rewritePidThreshold(old, start, end)
+                when {
+                    rewritten == null -> Unit
+                    rewritten == old -> alreadyThis = true
+                    else -> {
+                        item.put(key, rewritten)
+                        fields++
+                        changedThis = true
+                    }
+                }
+            }
+            if (changedThis) {
+                groups++
+                hitNames.add(gameName.ifBlank { "未命名策略组" })
+            } else if (alreadyThis) {
+                already++
+            }
+        }
+        if (groups == 0) {
+            if (already > 0) {
+                return TemplateResult("所选策略组温控已是 ${start}°C，无需修改", root.toString())
+            }
+            throw IOException(
+                if (targets.isEmpty()) "未找到可修改的策略组温控 PID"
+                else "未找到 ${targets.joinToString(", ")} 的策略组温控 PID",
+            )
+        }
+        val who = if (targets.isEmpty()) "全部已有 PID 的策略组" else hitNames.joinToString("、")
+        return TemplateResult(
+            "已将 $who 的温控阈值写成 Joyose 格式 $start:$end（${start}°C，共 $fields 处）",
+            root.toString(),
+        )
+    }
+
+    private fun pidGroupPackages(gb: JSONObject): Map<String, List<String>> {
+        val arr = gb.optJSONArray("game_group_mapping_config") ?: return emptyMap()
+        val out = linkedMapOf<String, List<String>>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val name = item.optString("game_group_name").trim()
+            if (name.isEmpty()) continue
+            val pkgs = item.optJSONArray("package_list") ?: JSONArray()
+            val list = (0 until pkgs.length()).map { pkgs.optString(it).trim() }.filter { it.isNotEmpty() }
+            out[name] = list
+        }
+        return out
+    }
+
+    private fun pidOverrideMatches(gameName: String, targets: List<String>, groupPkgs: Map<String, List<String>>): Boolean {
+        val name = gameName.trim()
+        if (name.isEmpty()) return false
+        if (targets.any { it.equals(name, ignoreCase = true) }) return true
+        val mapped = groupPkgs[name].orEmpty()
+        if (mapped.any { pkg -> targets.any { it.equals(pkg, ignoreCase = true) } }) return true
+        return false
+    }
+
+    private fun rewritePidThreshold(raw: String, start: String, end: String): String? {
+        if (raw.isBlank()) return null
+        val pattern = Regex(
+            """(\d+(?:\.\d+)?):(\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)(?: (\d+(?:\.\d+)?))?""",
+        )
+        var any = false
         val updated = pattern.replace(raw) { m ->
             val t1 = m.groupValues[1].toDoubleOrNull() ?: return@replace m.value
-            if (t1 >= 46.5 || t1 <= 10.0) return@replace m.value
+            if (t1 <= 10.0) return@replace m.value
+            any = true
+            if (formatJoyoseTemp(t1) == start) return@replace m.value
             val fps = m.groupValues[3]
             val minFps = m.groupValues[4]
             val kp = m.groupValues[5]
             val ki = m.groupValues[6]
             val kd = m.groupValues.getOrNull(7).orEmpty()
-            "47:48 $fps $minFps $kp $ki" + if (kd.isNotBlank()) " $kd" else ""
+            "$start:$end $fps $minFps $kp $ki" + if (kd.isNotBlank()) " $kd" else ""
         }
-        if (updated == raw) throw IOException("未找到可放宽的 PID 阈值")
-        return TemplateResult("所有策略组温控已放宽到 47°C", normalizeJson(updated))
+        return if (any) updated else null
     }
 
     private fun raiseMigt(current: String, pkg: String): TemplateResult {
@@ -2843,6 +2985,12 @@ fun prettyJson(raw: String): String {
         val t = raw.trim()
         if (t.startsWith("[")) JSONArray(t).toString(2) else JSONObject(t).toString(2)
     }.getOrElse { raw }
+}
+
+fun formatJoyoseTemp(value: Double): String {
+    val rounded = kotlin.math.round(value * 10.0) / 10.0
+    val asLong = rounded.toLong()
+    return if (kotlin.math.abs(rounded - asLong.toDouble()) < 1e-9) asLong.toString() else "%.1f".format(Locale.US, rounded)
 }
 
 fun q(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"
